@@ -53,9 +53,10 @@ def _positive_float(value: str) -> float:
 
 from dataclasses import dataclass
 
-from pywayland.protocol.wayland import WlSeat
+from pywayland.protocol.wayland import WlKeyboard, WlSeat
 from pywayland.server import Display, Listener
 from wlroots import helper as wlroots_helper
+from wlroots import lib as wlr_lib
 from wlroots.util.clock import Timespec
 from wlroots.util.log import log_init
 from wlroots.wlr_types import OutputLayout
@@ -70,7 +71,12 @@ from wlroots.wlr_types.cursor import (
 from wlroots.wlr_types.pointer import ButtonState
 from wlroots.wlr_types.data_device_manager import DataDeviceManager
 from wlroots.wlr_types.input_device import InputDevice, InputDeviceType
-from wlroots.wlr_types.keyboard import Keyboard, KeyboardKeyEvent, KeyboardModifiers
+from wlroots.wlr_types.keyboard import (
+    Keyboard,
+    KeyboardKeyEvent,
+    KeyboardModifier,
+    KeyboardModifiers,
+)
 from wlroots.wlr_types.output import CustomMode, Output, OutputEventRequestState
 from wlroots.wlr_types.scene import (
     Scene,
@@ -97,6 +103,7 @@ class View:
 class Compositor:
     def __init__(self, interrupted, *, scale: float = 1.0) -> None:
         self._interrupted = interrupted
+        self._running = True
         self._output_scale = scale
         self.display = Display()
         (
@@ -158,7 +165,7 @@ class Compositor:
 
         loop = self.display.get_event_loop()
         with self.backend:
-            while not self._interrupted():
+            while self._running and not self._interrupted():
                 self.display.flush_clients()
                 loop.dispatch(200)  # ms; bounded so signals fire promptly
 
@@ -269,6 +276,27 @@ class Compositor:
             node = parent.node
         return None
 
+    # --- compositor key bindings ---
+
+    def _handle_compositor_key(
+        self, keyboard: Keyboard, event: KeyboardKeyEvent
+    ) -> bool:
+        """Intercept compositor-level shortcuts. Returns True if consumed."""
+        if self._is_exit_chord(keyboard, event):
+            self._running = False
+            return True
+        return False
+
+    @staticmethod
+    def _is_exit_chord(keyboard: Keyboard, event: KeyboardKeyEvent) -> bool:
+        """Alt+Shift+E: terminate the compositor."""
+        required = KeyboardModifier.ALT | KeyboardModifier.SHIFT
+        return (
+            event.state == WlKeyboard.key_state.pressed
+            and (keyboard.modifier & required) == required
+            and event_keysym(keyboard, event) == keysym("e")
+        )
+
     # --- input ---
 
     def _on_new_input(self, _listener, device: InputDevice) -> None:
@@ -278,6 +306,8 @@ class Compositor:
             keyboard.set_repeat_info(25, 600)
 
             def _on_key(_l, event: KeyboardKeyEvent) -> None:
+                if self._handle_compositor_key(keyboard, event):
+                    return
                 self.seat.set_keyboard(keyboard)
                 self.seat.keyboard_notify_key(event)
 
@@ -359,6 +389,23 @@ class Compositor:
         if scene_surface is None:
             return None, 0.0, 0.0
         return scene_surface.surface, sx, sy
+
+
+# --- xkb keysym helpers ---
+
+
+def keysym(name: str) -> int:
+    """Return the xkb keysym for ``name`` (e.g. "q", "Escape", "F1")."""
+    return wlr_lib.xkb_keysym_from_name(name.encode(), wlr_lib.XKB_KEYSYM_NO_FLAGS)
+
+
+def event_keysym(keyboard: Keyboard, event: KeyboardKeyEvent) -> int:
+    """Resolve a key event to a layout-aware, lowercased xkb keysym."""
+    xkb_keycode = event.keycode + 8  # libinput → xkb (X11 +8 offset)
+    sym = wlr_lib.xkb_state_key_get_one_sym(
+        keyboard._ptr.xkb_state, xkb_keycode
+    )
+    return wlr_lib.xkb_keysym_to_lower(sym)
 
 
 if __name__ == "__main__":

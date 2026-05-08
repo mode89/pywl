@@ -64,6 +64,16 @@ Findings from building a pywlroots compositor.
 - Maintain a `views: list[View]` ordered bottom-to-top (focus moves the entry to the end). On unmap, drop the view; if it was focused, refocus `views[-1]` (or `keyboard_clear_focus()` if empty). Without this fallback, closing the focused window leaves the seat focused on a destroyed surface.
 - Click-to-focus belongs in the **press** branch of `button_event` (`ButtonState.PRESSED`); always forward the button to the seat afterwards regardless. Focusing on release feels laggy and breaks drag-to-select inside clients.
 
+## Compositor key bindings
+
+- Canonical wlroots pattern is **keysym matching, not raw keycode comparison** (see `tinywl.c` and qtile's wayland backend). `wlr_keyboard_key_event.keycode` is the libinput/evdev keycode; convert to xkb keycode with `+ 8` (X11 offset) and feed it through `xkb_state_key_get_one_sym(keyboard._ptr.xkb_state, xkb_keycode)` to get a layout-aware keysym.
+- pywlroots doesn't wrap `wlr_keyboard.xkb_state` as a Python property, but the C field is reachable as `keyboard._ptr.xkb_state`. Likewise the libxkbcommon functions (`xkb_keysym_from_name`, `xkb_state_key_get_one_sym`, `xkb_keysym_to_lower`, …) are already present on `from wlroots import lib`. No separate cffi build needed.
+- Lowercase the resulting keysym with `xkb_keysym_to_lower` so Shift+letter compares equal to the unshifted form (`XKB_KEY_Q` → `XKB_KEY_q`). Match against `xkb_keysym_from_name(b"q", XKB_KEYSYM_NO_FLAGS)` — don't pass `XKB_KEYSYM_CASE_INSENSITIVE`, that just lowercases the lookup, not the runtime sym.
+- `keyboard.modifier` returns a `KeyboardModifier` IntFlag with the currently active modifiers. To allow extra modifiers (CapsLock, NumLock) while requiring at least Alt+Shift, mask: `(mods & required) == required` rather than `mods == required`.
+- Filter on `event.state == WlKeyboard.key_state.pressed` (imported from `pywayland.protocol.wayland`); acting on release feels laggy and double-fires repeats. `WlKeyboard.key_state` also has a `repeated` value — don't accidentally trigger on key repeat.
+- Intercepting a binding means **not forwarding it to the focused client**. Return early from the key handler before `seat.keyboard_notify_key(event)` so the client never sees the press; otherwise apps will also see the chord and might react (e.g. close a tab).
+- Can't test bindings via `wtype` against this compositor: wtype needs `wp_virtual_keyboard_v1`, which we don't expose. Direct unit-style calls to the binding handler with mocked event/keyboard (and `mock.patch` over `event_keysym`) are the path of least resistance.
+
 ## Testing discipline
 
 - Always bound external commands with `timeout`, and inner test loops with explicit `kill -9` fallbacks. A stuck compositor will otherwise hang the harness indefinitely.
