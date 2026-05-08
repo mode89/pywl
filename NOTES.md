@@ -79,6 +79,16 @@ Findings from building a pywlroots compositor.
 - Intercepting a binding means **not forwarding it to the focused client**. Return early from the key handler before `seat.keyboard_notify_key(event)` so the client never sees the press; otherwise apps will also see the chord and might react (e.g. close a tab).
 - Can't test bindings via `wtype` against this compositor: wtype needs `wp_virtual_keyboard_v1`, which we don't expose. Direct unit-style calls to the binding handler with mocked event/keyboard (and `mock.patch` over `event_keysym`) are the path of least resistance.
 
+## Layer shell
+
+- `SceneTree.create(parent)` appends above existing children, so child creation order on `scene.tree` *is* z-order. Build the stack background → bottom → tiling → top → overlay; parent toplevels under the tiling tree so layers sandwich them.
+- `SceneLayerSurfaceV1.configure(full, usable)` positions the node from anchor/margin and *mutates `usable` in place* to subtract positive exclusive zones. Don't compute that geometry yourself.
+- Two-pass arrange (exclusive across OVERLAY→BACKGROUND, then non-exclusive) is needed once you mix e.g. exclusive TOP with non-exclusive BACKGROUND; single pass happens to work for waybar+swaybg.
+- `LayerSurfaceV1.output` is `None` at `new_surface` if the client didn't pick one. Assign before anything else — `wlr_scene_layer_surface_v1_configure` deref's it.
+- Layer is on `pending.layer` at new_surface, `current.layer` after each commit. Clients can `set_layer` at runtime (v2+); reparent in `commit_event` when it changes.
+- waybar exits with "Failed to acquire required resources" if `zxdg_output_manager_v1` is missing, even though `wl_output` and `zwlr_layer_shell_v1` are present. Create `XdgOutputManagerV1(display, output_layout)`.
+- pywlroots property accessors that return wrapper objects (e.g. `LayerSurfaceV1.output`) construct a *new* Python wrapper around the same C ptr on every call. Don't key dicts on `id(output)` of values pulled from such properties — it won't match `id()` of the wrapper you stored at creation time. Compare `._ptr` (cffi cdata, address-equal) or look the wrapper up in your own list.
+
 ## Testing discipline
 
 - Always bound external commands with `timeout`, and inner test loops with explicit `kill -9` fallbacks. A stuck compositor will otherwise hang the harness indefinitely.

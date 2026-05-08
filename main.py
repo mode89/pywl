@@ -71,7 +71,14 @@ from wlroots import ffi as wlr_ffi
 from wlroots import lib as wlr_lib
 from wlroots.util.clock import Timespec
 from wlroots.util.log import log_init
+from wlroots.util.box import Box
 from wlroots.wlr_types import OutputLayout
+from wlroots.wlr_types.xdg_output_v1 import XdgOutputManagerV1
+from wlroots.wlr_types.layer_shell_v1 import (
+    LayerShellV1,
+    LayerShellV1Layer,
+    LayerSurfaceV1,
+)
 from wlroots.wlr_types.cursor import (
     Cursor,
     PointerAxisEvent,
@@ -92,6 +99,7 @@ from wlroots.wlr_types.output import CustomMode, Output, OutputEventRequestState
 from wlroots.wlr_types.scene import (
     Scene,
     SceneBuffer,
+    SceneLayerSurfaceV1,
     SceneNode,
     SceneNodeType,
     SceneOutput,
@@ -124,6 +132,17 @@ class View:
     box: tuple[int, int, int, int] = (0, 0, 0, 0)  # last placed (x, y, w, h)
 
 
+@dataclass(eq=False)
+class LayerView:
+    """A mapped layer-shell surface bound to an output."""
+
+    layer_surface: LayerSurfaceV1
+    scene: SceneLayerSurfaceV1
+    output: Output
+    layer: LayerShellV1Layer
+    mapped: bool = False
+
+
 @dataclass
 class Context:  # pylint: disable=too-many-instance-attributes
     """Compositor state. Passed as first argument to every handler."""
@@ -139,9 +158,13 @@ class Context:  # pylint: disable=too-many-instance-attributes
 
     output_layout: OutputLayout
     scene: Scene
+    tiling_tree: SceneTree
+    layer_trees: dict
     data_device_manager: DataDeviceManager
     seat: Seat
     xdg_shell: XdgShell
+    layer_shell: LayerShellV1
+    xdg_output_manager: XdgOutputManagerV1
     xdg_decoration_manager: XdgDecorationManagerV1
     cursor: Cursor
     cursor_manager: XCursorManager
@@ -154,6 +177,10 @@ class Context:  # pylint: disable=too-many-instance-attributes
     outputs: list[Output] = field(default_factory=list)
     listeners: list[Listener] = field(default_factory=list)
     views: list[View] = field(default_factory=list)  # left-to-right tiling order; views[0] is master
+    layer_views: list[LayerView] = field(default_factory=list)
+    # Output-id-keyed cache of usable area (full output minus exclusive zones).
+    # Updated by arrange_layers; apply_tiling reads it.
+    output_usable: dict = field(default_factory=dict)
     focused_view: View | None = None
     fullscreen_view: View | None = None
 
@@ -174,6 +201,16 @@ def create_context(  # pylint: disable=too-many-locals
     scene = Scene()
     scene.attach_output_layout(output_layout)
 
+    # Stack scene root bottom-to-top: background, bottom, tiling, top, overlay.
+    # SceneTree.create appends above existing children, so creation order = z-order.
+    layer_trees = {
+        LayerShellV1Layer.BACKGROUND: SceneTree.create(scene.tree),
+        LayerShellV1Layer.BOTTOM: SceneTree.create(scene.tree),
+    }
+    tiling_tree = SceneTree.create(scene.tree)
+    layer_trees[LayerShellV1Layer.TOP] = SceneTree.create(scene.tree)
+    layer_trees[LayerShellV1Layer.OVERLAY] = SceneTree.create(scene.tree)
+
     xkb_context = xkb.Context()
     xkb_keymap = xkb_context.keymap_new_from_names()
 
@@ -187,9 +224,15 @@ def create_context(  # pylint: disable=too-many-locals
         backend=backend,
         output_layout=output_layout,
         scene=scene,
+        tiling_tree=tiling_tree,
+        layer_trees=layer_trees,
         data_device_manager=DataDeviceManager(display),
         seat=Seat(display, "seat0"),
         xdg_shell=XdgShell(display),
+        layer_shell=LayerShellV1(display, version=4),
+        # waybar (and other layer-shell clients) bail with "Failed to acquire
+        # required resources" if zxdg_output_manager_v1 is missing.
+        xdg_output_manager=XdgOutputManagerV1(display, output_layout),
         xdg_decoration_manager=XdgDecorationManagerV1.create(display),
         cursor=Cursor(output_layout),
         cursor_manager=XCursorManager(None, 24),
@@ -199,6 +242,9 @@ def create_context(  # pylint: disable=too-many-locals
 
     ctx.xdg_shell.new_surface_event.add(
         Listener(partial(on_new_xdg_surface, ctx))
+    )
+    ctx.layer_shell.new_surface_event.add(
+        Listener(partial(on_new_layer_surface, ctx))
     )
     ctx.xdg_decoration_manager.new_toplevel_decoration_event.add(
         Listener(on_new_toplevel_decoration)
@@ -296,9 +342,9 @@ def on_new_xdg_surface(
 ) -> None:
     if xdg_surface.role != XdgSurfaceRole.TOPLEVEL:
         return
-    scene_tree = Scene.xdg_surface_create(ctx.scene.tree, xdg_surface)
+    scene_tree = Scene.xdg_surface_create(ctx.tiling_tree, xdg_surface)
     border = SceneRect(
-        ctx.scene.tree, 0, 0, wlr_ffi.new("float[4]", list(BORDER_COLOR))
+        ctx.tiling_tree, 0, 0, wlr_ffi.new("float[4]", list(BORDER_COLOR))
     )
     # Render border below the surface so it shows only as a frame around it.
     border.node.place_below(scene_tree.node)
@@ -320,6 +366,7 @@ def on_new_xdg_surface(
         view.border.node.destroy()
         if ctx.fullscreen_view is view:
             ctx.fullscreen_view = None
+            update_visibility(ctx)
         if view in ctx.views:
             ctx.views.remove(view)
             apply_tiling(ctx)
@@ -339,6 +386,96 @@ def on_new_xdg_surface(
         ctx.listeners.append(listener)
 
 
+# --- layer shell ---
+
+
+def on_new_layer_surface(
+    ctx: Context, _listener, layer_surface: LayerSurfaceV1
+) -> None:
+    # Clients may leave output unset; pin to the first output we have.
+    if layer_surface.output is None:
+        if not ctx.outputs:
+            layer_surface.destroy()
+            return
+        layer_surface.output = ctx.outputs[0]
+
+    # Resolve to *our* Output wrapper (same C ptr, but `layer_surface.output`
+    # constructs a fresh Python wrapper each call — different id()—which would
+    # make the `output_usable` cache key miss in apply_tiling.
+    target_ptr = layer_surface.output._ptr
+    output = next(
+        (o for o in ctx.outputs if o._ptr == target_ptr), ctx.outputs[0]
+    )
+    layer = layer_surface.pending.layer
+    parent = ctx.layer_trees[layer]
+    scene = Scene.layer_surface_v1_create(parent, layer_surface)
+    lview = LayerView(
+        layer_surface=layer_surface, scene=scene, output=output, layer=layer
+    )
+    ctx.layer_views.append(lview)
+    surface = layer_surface.surface
+
+    def _on_map(_l, _d) -> None:
+        lview.mapped = True
+        arrange_layers(ctx, output)
+
+    def _on_unmap(_l, _d) -> None:
+        lview.mapped = False
+        arrange_layers(ctx, output)
+
+    def _on_commit(_l, _d) -> None:
+        # Layer can change at runtime via set_layer; reparent if so.
+        current_layer = lview.layer_surface.current.layer
+        if current_layer != lview.layer:
+            lview.scene.tree.node.reparent(ctx.layer_trees[current_layer])
+            lview.layer = current_layer
+        arrange_layers(ctx, output)
+
+    def _on_destroy(_l, _d) -> None:
+        if lview in ctx.layer_views:
+            ctx.layer_views.remove(lview)
+        arrange_layers(ctx, output)
+
+    for sig, handler in (
+        (surface.map_event, _on_map),
+        (surface.unmap_event, _on_unmap),
+        (surface.commit_event, _on_commit),
+        (layer_surface.destroy_event, _on_destroy),
+    ):
+        listener = Listener(handler)
+        sig.add(listener)
+        ctx.listeners.append(listener)
+
+
+def arrange_layers(ctx: Context, output: Output) -> None:
+    """Position layer surfaces and recompute the output's usable area.
+
+    Two-pass like sway: exclusive-zone surfaces first (so they reserve space),
+    then non-exclusive ones (which fill what remains). Within each pass we walk
+    layers top-down so higher-z exclusive zones are reserved before lower-z.
+    """
+    full = ctx.output_layout.get_box(output)
+    usable = Box(full.x, full.y, full.width, full.height)
+    layer_order = (
+        LayerShellV1Layer.OVERLAY,
+        LayerShellV1Layer.TOP,
+        LayerShellV1Layer.BOTTOM,
+        LayerShellV1Layer.BACKGROUND,
+    )
+    on_output = [lv for lv in ctx.layer_views if lv.output is output]
+    for exclusive_pass in (True, False):
+        for layer in layer_order:
+            for lv in on_output:
+                if lv.layer_surface.current.layer != layer:
+                    continue
+                has_exclusive = lv.layer_surface.current.exclusive_zone > 0
+                if has_exclusive != exclusive_pass:
+                    continue
+                lv.scene.configure(full, usable)
+    ctx.output_usable[id(output)] = usable
+    apply_tiling(ctx)
+
+
 # --- tiling ---
 
 
@@ -350,13 +487,15 @@ def apply_tiling(ctx: Context) -> None:
     """
     if not ctx.views or not ctx.outputs:
         return
-    box = ctx.output_layout.get_box(ctx.outputs[0])
+    output = ctx.outputs[0]
+    full = ctx.output_layout.get_box(output)
     if ctx.fullscreen_view is not None and ctx.fullscreen_view in ctx.views:
         place_fullscreen(
-            ctx.fullscreen_view, box.x, box.y, box.width, box.height
+            ctx.fullscreen_view, full.x, full.y, full.width, full.height
         )
         ctx.fullscreen_view.scene_tree.node.raise_to_top()
         return
+    box = ctx.output_usable.get(id(output), full)
     master, *stack = ctx.views
     if not stack:
         place_tile(master, box.x, box.y, box.width, box.height)
@@ -497,7 +636,20 @@ def toggle_fullscreen(ctx: Context) -> None:
     if view is None:
         return
     ctx.fullscreen_view = None if ctx.fullscreen_view is view else view
+    update_visibility(ctx)
     apply_tiling(ctx)
+
+
+def update_visibility(ctx: Context) -> None:
+    """In fullscreen, hide layer surfaces and other tiles so only the
+    fullscreen view's subtree renders. Otherwise everything is visible."""
+    fs = ctx.fullscreen_view
+    for tree in ctx.layer_trees.values():
+        tree.node.set_enabled(enabled=fs is None)
+    for v in ctx.views:
+        visible = fs is None or v is fs
+        v.scene_tree.node.set_enabled(enabled=visible)
+        v.border.node.set_enabled(enabled=visible)
 
 
 def handle_focus_direction_chord(
