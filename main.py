@@ -1,5 +1,6 @@
 """Minimal Wayland compositor using pywlroots."""
 
+import argparse
 import os
 import signal
 import subprocess
@@ -24,10 +25,30 @@ def main() -> int:
     signal.signal(signal.SIGINT, _interrupt)
     signal.signal(signal.SIGTERM, _interrupt)
 
+    args = _parse_args(sys.argv[1:])
+
     log_init(logging.INFO)
-    Compositor(_interrupted).run()
+    Compositor(_interrupted, scale=args.scale).run()
 
     return 0
+
+
+def _parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog="pywl")
+    parser.add_argument(
+        "--scale",
+        type=_positive_float,
+        default=1.0,
+        help="Output scale factor applied to every output (default: 1.0).",
+    )
+    return parser.parse_args(argv)
+
+
+def _positive_float(value: str) -> float:
+    f = float(value)
+    if f <= 0:
+        raise argparse.ArgumentTypeError(f"scale must be > 0, got {value!r}")
+    return f
 
 
 from dataclasses import dataclass
@@ -74,8 +95,9 @@ class View:
 
 
 class Compositor:
-    def __init__(self, interrupted) -> None:
+    def __init__(self, interrupted, *, scale: float = 1.0) -> None:
         self._interrupted = interrupted
+        self._output_scale = scale
         self.display = Display()
         (
             self.compositor,
@@ -156,6 +178,7 @@ class Compositor:
         else:
             # wl/headless backends have no fixed modes; pick something.
             output.set_custom_mode(CustomMode(width=1280, height=720, refresh=0))
+        output.set_scale(self._output_scale)
         output.enable()
         output.commit()
 
