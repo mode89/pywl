@@ -154,6 +154,7 @@ class Context:  # pylint: disable=too-many-instance-attributes
     listeners: list[Listener] = field(default_factory=list)
     views: list[View] = field(default_factory=list)  # left-to-right tiling order; views[0] is master
     focused_view: View | None = None
+    fullscreen_view: View | None = None
 
 
 def create_context(  # pylint: disable=too-many-locals
@@ -316,6 +317,8 @@ def on_new_xdg_surface(
 
     def _on_unmap(_l, _d) -> None:
         view.border.node.destroy()
+        if ctx.fullscreen_view is view:
+            ctx.fullscreen_view = None
         if view in ctx.views:
             ctx.views.remove(view)
             apply_tiling(ctx)
@@ -347,6 +350,12 @@ def apply_tiling(ctx: Context) -> None:
     if not ctx.views or not ctx.outputs:
         return
     box = ctx.output_layout.get_box(ctx.outputs[0])
+    if ctx.fullscreen_view is not None and ctx.fullscreen_view in ctx.views:
+        place_fullscreen(
+            ctx.fullscreen_view, box.x, box.y, box.width, box.height
+        )
+        ctx.fullscreen_view.scene_tree.node.raise_to_top()
+        return
     master, *stack = ctx.views
     if not stack:
         place_tile(master, box.x, box.y, box.width, box.height)
@@ -378,6 +387,14 @@ def place_tile(view: View, x: int, y: int, w: int, h: int) -> None:
     view.border.set_size(w, h)
     view.scene_tree.node.set_position(x + b, y + b)
     view.xdg_surface.set_size(max(0, w - 2 * b), max(0, h - 2 * b))
+
+
+def place_fullscreen(view: View, x: int, y: int, w: int, h: int) -> None:
+    """Cover the output: surface fills the box, border is hidden behind it."""
+    view.border.node.set_position(x, y)
+    view.border.set_size(w, h)
+    view.scene_tree.node.set_position(x, y)
+    view.xdg_surface.set_size(w, h)
 
 
 # --- focus ---
@@ -432,6 +449,9 @@ def handle_compositor_key(
     if is_spawn_terminal_chord(keyboard, event):
         spawn_terminal()
         return True
+    if is_toggle_fullscreen_chord(keyboard, event):
+        toggle_fullscreen(ctx)
+        return True
     return False
 
 
@@ -454,6 +474,25 @@ def is_spawn_terminal_chord(
         and bool(keyboard.modifier & KeyboardModifier.ALT)
         and event_keysym(keyboard, event) == keysym("Return")
     )
+
+
+def is_toggle_fullscreen_chord(
+    keyboard: Keyboard, event: KeyboardKeyEvent
+) -> bool:
+    """Alt+F: toggle fullscreen on the focused view."""
+    return (
+        event.state == WlKeyboard.key_state.pressed
+        and bool(keyboard.modifier & KeyboardModifier.ALT)
+        and event_keysym(keyboard, event) == keysym("f")
+    )
+
+
+def toggle_fullscreen(ctx: Context) -> None:
+    view = ctx.focused_view
+    if view is None:
+        return
+    ctx.fullscreen_view = None if ctx.fullscreen_view is view else view
+    apply_tiling(ctx)
 
 
 def spawn_terminal() -> None:
