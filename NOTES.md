@@ -49,6 +49,20 @@ Findings from building a pywlroots compositor.
 - Call `seat.set_keyboard(kbd)` and `seat.set_capabilities(WlSeat.capability.keyboard | .pointer)` so clients see the seat.
 - **Focus on surface map, not on xdg-surface creation.** XdgSurface in 0.17 has no `map_event`; the map/unmap events live on the underlying `Surface` (`xdg_surface.surface.map_event`). Hook that and call `seat.keyboard_notify_enter(surface, keyboard)` there.
 - `seat.keyboard` is not a property — it's `seat.get_keyboard()`.
+- Pointers: own a single `Cursor(output_layout)` + `XCursorManager(None, 24)` for the whole compositor. On each `InputDeviceType.POINTER` from `new_input_event`, `cursor.attach_input_device(device)` — don't make a Cursor per device.
+- Cursor signals (`motion_event`, `motion_absolute_event`, `button_event`, `axis_event`, `frame_event`) are on the `Cursor` instance, not on the input device. Attaching the device routes its raw events through them.
+- Relative motion: `cursor.move(event.delta_x, event.delta_y, input_device=event.pointer.base)`. Absolute: `cursor.warp(WarpMode.AbsoluteClosest, event.x, event.y, input_device=event.pointer.base)`. `event.pointer.base` is the `InputDevice` (needed so per-device mapping is respected).
+- Hit-testing: `scene.tree.node.node_at(cursor.x, cursor.y)` → `(node, sx, sy)`. To get the surface: check `node.type == SceneNodeType.BUFFER`, then `SceneSurface.from_buffer(SceneBuffer.from_node(node))` — may still return None for non-surface buffers.
+- Forward to seat: on motion, `pointer_notify_enter(surface, sx, sy)` (idempotent — wlroots no-ops if already focused) followed by `pointer_notify_motion(time, sx, sy)`; on no surface, `pointer_notify_clear_focus()` and `cursor.set_xcursor(manager, "default")` so the root area gets the default arrow. Buttons/axis pass straight through; emit `pointer_notify_frame()` from `frame_event`.
+- Call `cursor_manager.load(output.scale)` from `_on_new_output` to ensure the theme is rasterized at that output's scale.
+
+## Focus
+
+- Tag each toplevel's `scene_tree.node.data` with a Python `View` object at xdg-surface creation time. Click hit-test: `scene.tree.node.node_at(x, y)` returns a leaf (a buffer/surface node); walk `node.parent.node` upward until `node.data` is a `View`. That's how you map any subsurface/decoration hit back to the owning toplevel.
+- `SceneNode.data` setter stashes the value in a `WeakValueDictionary` keyed on the value, so the value must be hashable. `@dataclass` defaults to `eq=True` → `__hash__ = None` → `TypeError: unhashable type`. Use `@dataclass(eq=False)` (or a plain class) for anything you store via `node.data = ...`.
+- Focus transfer: `prev.set_activated(False)`, `view.scene_tree.node.raise_to_top()`, `view.xdg_surface.set_activated(True)`, then `seat.keyboard_notify_enter(surface, keyboard)` (handles leave on the previous focus). `XdgSurface.set_activated` works directly — no need to dig into `xdg_surface.toplevel`.
+- Maintain a `views: list[View]` ordered bottom-to-top (focus moves the entry to the end). On unmap, drop the view; if it was focused, refocus `views[-1]` (or `keyboard_clear_focus()` if empty). Without this fallback, closing the focused window leaves the seat focused on a destroyed surface.
+- Click-to-focus belongs in the **press** branch of `button_event` (`ButtonState.PRESSED`); always forward the button to the seat afterwards regardless. Focusing on release feels laggy and breaks drag-to-select inside clients.
 
 ## Testing discipline
 

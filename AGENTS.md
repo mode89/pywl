@@ -5,13 +5,12 @@ A minimal Wayland compositor written in Python on top of `pywlroots`.
 ## Layout
 
 - `main.py` — single-file compositor implementation.
-- `shell.nix` — NixOS dev shell. Provides `python3` with `pywlroots`.
 - `NOTES.md` — log of findings (API quirks, version-specific behavior, workarounds).
 
 ## Running
 
 ```
-nix-shell --run "python main.py"
+python main.py
 ```
 
 Inside a running session (e.g. Hyprland), the wl backend is auto-selected and a nested window appears. The socket is printed as `WAYLAND_DISPLAY=wayland-N`.
@@ -27,7 +26,7 @@ The compositor blocks in an event loop. To validate a change end-to-end:
 
 1. Launch under `timeout` so a hang doesn't wedge the agent:
    ```
-   timeout 5 nix-shell --run "python main.py" &
+   timeout 5 python main.py &
    PID=$!
    ```
 2. Grab `WAYLAND_DISPLAY` from stdout, run a client (`foot`, `weston-terminal`) against it, observe.
