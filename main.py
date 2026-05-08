@@ -140,7 +140,7 @@ class Context:  # pylint: disable=too-many-instance-attributes
     keyboards: list[Keyboard] = field(default_factory=list)
     outputs: list[Output] = field(default_factory=list)
     listeners: list[Listener] = field(default_factory=list)
-    views: list[View] = field(default_factory=list)  # bottom-to-top stacking
+    views: list[View] = field(default_factory=list)  # left-to-right tiling order; views[0] is master
     focused_view: View | None = None
 
 
@@ -283,18 +283,20 @@ def on_new_xdg_surface(
     surface = xdg_surface.surface
 
     def _on_map(_l, _d) -> None:
-        ctx.views.append(view)
+        ctx.views.insert(0, view)
+        apply_tiling(ctx)
         focus_view(ctx, view)
 
     def _on_unmap(_l, _d) -> None:
         if view in ctx.views:
             ctx.views.remove(view)
+            apply_tiling(ctx)
         if ctx.focused_view is view:
             ctx.focused_view = None
             ctx.seat.keyboard_clear_focus()
-            # Hand focus to the next view in stacking order, if any.
+            # Promote the new master.
             if ctx.views:
-                focus_view(ctx, ctx.views[-1])
+                focus_view(ctx, ctx.views[0])
 
     for sig, handler in (
         (surface.map_event, _on_map),
@@ -303,6 +305,39 @@ def on_new_xdg_surface(
         listener = Listener(handler)
         sig.add(listener)
         ctx.listeners.append(listener)
+
+
+# --- tiling ---
+
+
+def apply_tiling(ctx: Context) -> None:
+    """Master/stack: views[0] is master on the left, rest stack vertically right.
+
+    Single window: full screen. New windows are inserted at index 0 and so
+    become the new master.
+    """
+    if not ctx.views or not ctx.outputs:
+        return
+    box = ctx.output_layout.get_box(ctx.outputs[0])
+    master, *stack = ctx.views
+    if not stack:
+        master.scene_tree.node.set_position(box.x, box.y)
+        master.xdg_surface.set_size(box.width, box.height)
+        return
+    master_w = box.width // 2
+    stack_w = box.width - master_w
+    master.scene_tree.node.set_position(box.x, box.y)
+    master.xdg_surface.set_size(master_w, box.height)
+    n = len(stack)
+    tile_h = box.height // n
+    remainder = box.height - tile_h * n
+    y = box.y
+    stack_x = box.x + master_w
+    for i, view in enumerate(stack):
+        h = tile_h + (1 if i < remainder else 0)
+        view.scene_tree.node.set_position(stack_x, y)
+        view.xdg_surface.set_size(stack_w, h)
+        y += h
 
 
 # --- focus ---
@@ -316,10 +351,6 @@ def focus_view(ctx: Context, view: View) -> None:
         prev.xdg_surface.set_activated(False)
     view.scene_tree.node.raise_to_top()
     view.xdg_surface.set_activated(True)
-    # Keep views ordered bottom-to-top so unmap can pick the new top.
-    if view in ctx.views:
-        ctx.views.remove(view)
-    ctx.views.append(view)
     ctx.focused_view = view
     keyboard = ctx.seat.get_keyboard()
     if keyboard is not None:
