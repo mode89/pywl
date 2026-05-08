@@ -64,6 +64,11 @@ Findings from building a pywlroots compositor.
 - Maintain a `views: list[View]` ordered bottom-to-top (focus moves the entry to the end). On unmap, drop the view; if it was focused, refocus `views[-1]` (or `keyboard_clear_focus()` if empty). Without this fallback, closing the focused window leaves the seat focused on a destroyed surface.
 - Click-to-focus belongs in the **press** branch of `button_event` (`ButtonState.PRESSED`); always forward the button to the seat afterwards regardless. Focusing on release feels laggy and breaks drag-to-select inside clients.
 
+## Strong refs to wrappers that own Signals
+
+- A `Listener` is kept alive only via `Signal._link` on the wlroots wrapper that owns the C signal (e.g. `Output.frame_event`). Lose the wrapper → lose the `Signal` → lose `_link` → lose the `wl_listener` cdata. wlroots doesn't crash; it silently stops dispatching.
+- Bit us in `on_new_output`: nothing held the `Output` wrapper, so frames stopped firing seconds in and the client appeared missing despite being mapped. Fix: append every wrapper we attach listeners to onto the long-lived context (`ctx.outputs.append(output)`, like `ctx.keyboards`).
+
 ## Compositor key bindings
 
 - Canonical wlroots pattern is **keysym matching, not raw keycode comparison** (see `tinywl.c` and qtile's wayland backend). `wlr_keyboard_key_event.keycode` is the libinput/evdev keycode; convert to xkb keycode with `+ 8` (X11 offset) and feed it through `xkb_state_key_get_one_sym(keyboard._ptr.xkb_state, xkb_keycode)` to get a layout-aware keysym.

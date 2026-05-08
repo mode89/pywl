@@ -13,22 +13,13 @@ from xkbcommon import xkb
 def main() -> int:
     # Install signal handlers as early as possible so SIGINT during startup
     # doesn't raise KeyboardInterrupt mid-construction.
-    interrupted = False
-
-    def _interrupted():
-        return interrupted
-
-    def _interrupt(_sig, _frame):
-        nonlocal interrupted
-        interrupted = True
-
-    signal.signal(signal.SIGINT, _interrupt)
-    signal.signal(signal.SIGTERM, _interrupt)
+    _interrupted = _install_signal_handlers()
 
     args = _parse_args(sys.argv[1:])
 
     log_init(logging.INFO)
-    Compositor(_interrupted, scale=args.scale).run()
+    ctx = create_context(_interrupted, scale=args.scale)
+    run(ctx)
 
     return 0
 
@@ -44,6 +35,19 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _install_signal_handlers():
+    interrupted = False
+
+    def _interrupt(_sig, _frame):
+        nonlocal interrupted
+        interrupted = True
+
+    signal.signal(signal.SIGINT, _interrupt)
+    signal.signal(signal.SIGTERM, _interrupt)
+
+    return lambda: interrupted
+
+
 def _positive_float(value: str) -> float:
     f = float(value)
     if f <= 0:
@@ -51,7 +55,9 @@ def _positive_float(value: str) -> float:
     return f
 
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from functools import partial
+from typing import Callable
 
 from pywayland.protocol.wayland import WlKeyboard, WlSeat
 from pywayland.server import Display, Listener
@@ -100,295 +106,355 @@ class View:
     scene_tree: SceneTree
 
 
-class Compositor:
-    def __init__(self, interrupted, *, scale: float = 1.0) -> None:
-        self._interrupted = interrupted
-        self._running = True
-        self._output_scale = scale
-        self.display = Display()
-        (
-            self.compositor,
-            self.allocator,
-            self.renderer,
-            self.backend,
-            _subcompositor,
-        ) = wlroots_helper.build_compositor(self.display)
+@dataclass
+class Context:
+    """Compositor state. Passed as first argument to every handler."""
 
-        self.output_layout = OutputLayout()
-        self.scene = Scene()
-        self.scene.attach_output_layout(self.output_layout)
+    interrupted: Callable[[], bool]
+    output_scale: float
 
-        self.data_device_manager = DataDeviceManager(self.display)
-        self.seat = Seat(self.display, "seat0")
+    display: Display
+    compositor: object
+    allocator: object
+    renderer: object
+    backend: object
 
-        self.xdg_shell = XdgShell(self.display)
-        self.xdg_shell.new_surface_event.add(Listener(self._on_new_xdg_surface))
+    output_layout: OutputLayout
+    scene: Scene
+    data_device_manager: DataDeviceManager
+    seat: Seat
+    xdg_shell: XdgShell
+    cursor: Cursor
+    cursor_manager: XCursorManager
+    xkb_context: object
+    xkb_keymap: object
 
-        self.backend.new_output_event.add(Listener(self._on_new_output))
-        self.backend.new_input_event.add(Listener(self._on_new_input))
+    running: bool = True
+    # Strong refs: pywayland holds raw pointers; Python-side GC mustn't reap.
+    keyboards: list[Keyboard] = field(default_factory=list)
+    outputs: list[Output] = field(default_factory=list)
+    listeners: list[Listener] = field(default_factory=list)
+    views: list[View] = field(default_factory=list)  # bottom-to-top stacking
+    focused_view: View | None = None
 
-        # Keep strong refs to per-device/surface listeners and keyboards
-        # so they aren't GC'd while wlroots still holds them.
-        self._keyboards: list[Keyboard] = []
-        self._listeners: list[Listener] = []
-        self._views: list[View] = []  # bottom-to-top stacking order
-        self._focused_view: View | None = None
 
-        self.cursor = Cursor(self.output_layout)
-        self.cursor_manager = XCursorManager(None, 24)
-        for signal, handler in (
-            (self.cursor.motion_event, self._on_cursor_motion),
-            (self.cursor.motion_absolute_event, self._on_cursor_motion_absolute),
-            (self.cursor.button_event, self._on_cursor_button),
-            (self.cursor.axis_event, self._on_cursor_axis),
-            (self.cursor.frame_event, self._on_cursor_frame),
-        ):
-            listener = Listener(handler)
-            signal.add(listener)
-            self._listeners.append(listener)
+def create_context(interrupted: Callable[[], bool], *, scale: float = 1.0) -> Context:
+    display = Display()
+    (
+        compositor,
+        allocator,
+        renderer,
+        backend,
+        _subcompositor,
+    ) = wlroots_helper.build_compositor(display)
 
-        self._xkb_context = xkb.Context()
-        self._xkb_keymap = self._xkb_context.keymap_new_from_names()
+    output_layout = OutputLayout()
+    scene = Scene()
+    scene.attach_output_layout(output_layout)
 
-    def run(self) -> None:
-        socket = self.display.add_socket().decode()
-        os.environ["WAYLAND_DISPLAY"] = socket
-        print(f"pywl: running on WAYLAND_DISPLAY={socket}")
+    xkb_context = xkb.Context()
+    xkb_keymap = xkb_context.keymap_new_from_names()
 
-        # Spawn a terminal so the empty session is immediately usable.
-        # Detach via start_new_session so it survives our shutdown path
-        # (os._exit) and doesn't receive our SIGINT.
-        subprocess.Popen(["alacritty"], start_new_session=True)
+    ctx = Context(
+        interrupted=interrupted,
+        output_scale=scale,
+        display=display,
+        compositor=compositor,
+        allocator=allocator,
+        renderer=renderer,
+        backend=backend,
+        output_layout=output_layout,
+        scene=scene,
+        data_device_manager=DataDeviceManager(display),
+        seat=Seat(display, "seat0"),
+        xdg_shell=XdgShell(display),
+        cursor=Cursor(output_layout),
+        cursor_manager=XCursorManager(None, 24),
+        xkb_context=xkb_context,
+        xkb_keymap=xkb_keymap,
+    )
 
-        # Drive the wayland event loop ourselves so Python signal
-        # handlers get a chance to fire between dispatches.
+    ctx.xdg_shell.new_surface_event.add(Listener(partial(on_new_xdg_surface, ctx)))
+    ctx.backend.new_output_event.add(Listener(partial(on_new_output, ctx)))
+    ctx.backend.new_input_event.add(Listener(partial(on_new_input, ctx)))
 
-        loop = self.display.get_event_loop()
-        with self.backend:
-            while self._running and not self._interrupted():
-                self.display.flush_clients()
-                loop.dispatch(200)  # ms; bounded so signals fire promptly
+    for sig, handler in (
+        (ctx.cursor.motion_event, on_cursor_motion),
+        (ctx.cursor.motion_absolute_event, on_cursor_motion_absolute),
+        (ctx.cursor.button_event, on_cursor_button),
+        (ctx.cursor.axis_event, on_cursor_axis),
+        (ctx.cursor.frame_event, on_cursor_frame),
+    ):
+        listener = Listener(partial(handler, ctx))
+        sig.add(listener)
+        ctx.listeners.append(listener)
 
-        # Skip Python's GC-driven teardown: pywlroots' object destructors
-        # don't agree with libwayland on ordering and segfault. The OS
-        # will reclaim everything cleanly.
-        os._exit(0)
+    return ctx
 
-    # --- handlers ---
 
-    def _on_new_output(self, _listener, output: Output) -> None:
-        output.init_render(self.allocator, self.renderer)
+def run(ctx: Context) -> None:
+    socket = ctx.display.add_socket().decode()
+    os.environ["WAYLAND_DISPLAY"] = socket
+    print(f"pywl: running on WAYLAND_DISPLAY={socket}")
 
-        mode = output.preferred_mode()
-        if mode is not None:
-            output.set_mode(mode)
-        else:
-            # wl/headless backends have no fixed modes; pick something.
-            output.set_custom_mode(CustomMode(width=1280, height=720, refresh=0))
-        output.set_scale(self._output_scale)
-        output.enable()
-        output.commit()
+    # Spawn a terminal so the empty session is immediately usable.
+    # Detach via start_new_session so it survives our shutdown path
+    # (os._exit) and doesn't receive our SIGINT.
+    subprocess.Popen(["foot"], start_new_session=True)
 
-        self.output_layout.add_auto(output)
-        scene_output = SceneOutput.create(self.scene, output)
-        self.cursor_manager.load(output.scale)
+    # Drive the wayland event loop ourselves so Python signal
+    # handlers get a chance to fire between dispatches.
+    loop = ctx.display.get_event_loop()
+    with ctx.backend:
+        while ctx.running and not ctx.interrupted():
+            ctx.display.flush_clients()
+            loop.dispatch(200)  # ms; bounded so signals fire promptly
 
-        def _on_frame(_l, _d) -> None:
-            scene_output.commit()
-            scene_output.send_frame_done(Timespec.get_monotonic_time())
+    # Skip Python's GC-driven teardown: pywlroots' object destructors
+    # don't agree with libwayland on ordering and segfault. The OS
+    # will reclaim everything cleanly.
+    os._exit(0)
 
-        output.frame_event.add(Listener(_on_frame))
 
-        def _on_request_state(_l, event: OutputEventRequestState) -> None:
-            # The wl/x11 backend asks us to apply a new mode/scale when the
-            # host window is resized or moved between monitors.
-            output.commit(event.state)
+# --- handlers ---
 
-        output.request_state_event.add(Listener(_on_request_state))
 
-    def _on_new_xdg_surface(self, _listener, xdg_surface: XdgSurface) -> None:
-        if xdg_surface.role != XdgSurfaceRole.TOPLEVEL:
-            return
-        scene_tree = Scene.xdg_surface_create(self.scene.tree, xdg_surface)
-        view = View(xdg_surface=xdg_surface, scene_tree=scene_tree)
-        # Tag the scene node so click hit-tests can recover the view by
-        # walking up parents from whatever (sub)surface was hit.
-        scene_tree.node.data = view
+def on_new_output(ctx: Context, _listener, output: Output) -> None:
+    # Keep a strong Python ref to the Output wrapper. Its frame_event /
+    # request_state_event Signal objects are attributes of this wrapper,
+    # and Signal._link is the only thing keeping our Listener (and its
+    # wl_listener cdata) alive. Letting the wrapper get GC'd silently
+    # drops the frame callback and the host window stops rendering.
+    ctx.outputs.append(output)
+    output.init_render(ctx.allocator, ctx.renderer)
 
-        surface = xdg_surface.surface
+    mode = output.preferred_mode()
+    if mode is not None:
+        output.set_mode(mode)
+    else:
+        # wl/headless backends have no fixed modes; pick something.
+        output.set_custom_mode(CustomMode(width=1280, height=720, refresh=0))
+    output.set_scale(ctx.output_scale)
+    output.enable()
+    output.commit()
 
-        def _on_map(_l, _d) -> None:
-            self._views.append(view)
-            self._focus_view(view)
+    ctx.output_layout.add_auto(output)
+    scene_output = SceneOutput.create(ctx.scene, output)
+    ctx.cursor_manager.load(output.scale)
 
-        def _on_unmap(_l, _d) -> None:
-            if view in self._views:
-                self._views.remove(view)
-            if self._focused_view is view:
-                self._focused_view = None
-                self.seat.keyboard_clear_focus()
-                # Hand focus to the next view in stacking order, if any.
-                if self._views:
-                    self._focus_view(self._views[-1])
+    def _on_frame(_l, _d) -> None:
+        scene_output.commit()
+        scene_output.send_frame_done(Timespec.get_monotonic_time())
 
-        for signal, handler in (
-            (surface.map_event, _on_map),
-            (surface.unmap_event, _on_unmap),
-        ):
-            listener = Listener(handler)
-            signal.add(listener)
-            self._listeners.append(listener)
+    output.frame_event.add(Listener(_on_frame))
 
-    # --- focus ---
+    def _on_request_state(_l, event: OutputEventRequestState) -> None:
+        # The wl/x11 backend asks us to apply a new mode/scale when the
+        # host window is resized or moved between monitors.
+        output.commit(event.state)
 
-    def _focus_view(self, view: View) -> None:
-        if self._focused_view is view:
-            return
-        prev = self._focused_view
-        if prev is not None:
-            prev.xdg_surface.set_activated(False)
-        view.scene_tree.node.raise_to_top()
-        view.xdg_surface.set_activated(True)
-        # Keep _views ordered bottom-to-top so unmap can pick the new top.
-        if view in self._views:
-            self._views.remove(view)
-        self._views.append(view)
-        self._focused_view = view
-        keyboard = self.seat.get_keyboard()
-        if keyboard is not None:
-            self.seat.keyboard_notify_enter(view.xdg_surface.surface, keyboard)
+    output.request_state_event.add(Listener(_on_request_state))
 
-    def _view_at(self, lx: float, ly: float) -> View | None:
-        result = self.scene.tree.node.node_at(lx, ly)
-        if result is None:
-            return None
-        node, _sx, _sy = result
-        return self._view_for_node(node)
 
-    def _view_for_node(self, node: SceneNode | None) -> View | None:
-        while node is not None:
-            data = node.data
-            if isinstance(data, View):
-                return data
-            parent = node.parent
-            if parent is None:
-                return None
-            node = parent.node
+def on_new_xdg_surface(ctx: Context, _listener, xdg_surface: XdgSurface) -> None:
+    if xdg_surface.role != XdgSurfaceRole.TOPLEVEL:
+        return
+    scene_tree = Scene.xdg_surface_create(ctx.scene.tree, xdg_surface)
+    view = View(xdg_surface=xdg_surface, scene_tree=scene_tree)
+    # Tag the scene node so click hit-tests can recover the view by
+    # walking up parents from whatever (sub)surface was hit.
+    scene_tree.node.data = view
+
+    surface = xdg_surface.surface
+
+    def _on_map(_l, _d) -> None:
+        ctx.views.append(view)
+        focus_view(ctx, view)
+
+    def _on_unmap(_l, _d) -> None:
+        if view in ctx.views:
+            ctx.views.remove(view)
+        if ctx.focused_view is view:
+            ctx.focused_view = None
+            ctx.seat.keyboard_clear_focus()
+            # Hand focus to the next view in stacking order, if any.
+            if ctx.views:
+                focus_view(ctx, ctx.views[-1])
+
+    for sig, handler in (
+        (surface.map_event, _on_map),
+        (surface.unmap_event, _on_unmap),
+    ):
+        listener = Listener(handler)
+        sig.add(listener)
+        ctx.listeners.append(listener)
+
+
+# --- focus ---
+
+
+def focus_view(ctx: Context, view: View) -> None:
+    if ctx.focused_view is view:
+        return
+    prev = ctx.focused_view
+    if prev is not None:
+        prev.xdg_surface.set_activated(False)
+    view.scene_tree.node.raise_to_top()
+    view.xdg_surface.set_activated(True)
+    # Keep views ordered bottom-to-top so unmap can pick the new top.
+    if view in ctx.views:
+        ctx.views.remove(view)
+    ctx.views.append(view)
+    ctx.focused_view = view
+    keyboard = ctx.seat.get_keyboard()
+    if keyboard is not None:
+        ctx.seat.keyboard_notify_enter(view.xdg_surface.surface, keyboard)
+
+
+def view_at(ctx: Context, lx: float, ly: float) -> View | None:
+    result = ctx.scene.tree.node.node_at(lx, ly)
+    if result is None:
         return None
+    node, _sx, _sy = result
+    return view_for_node(node)
 
-    # --- compositor key bindings ---
 
-    def _handle_compositor_key(
-        self, keyboard: Keyboard, event: KeyboardKeyEvent
-    ) -> bool:
-        """Intercept compositor-level shortcuts. Returns True if consumed."""
-        if self._is_exit_chord(keyboard, event):
-            self._running = False
-            return True
-        return False
+def view_for_node(node: SceneNode | None) -> View | None:
+    while node is not None:
+        data = node.data
+        if isinstance(data, View):
+            return data
+        parent = node.parent
+        if parent is None:
+            return None
+        node = parent.node
+    return None
 
-    @staticmethod
-    def _is_exit_chord(keyboard: Keyboard, event: KeyboardKeyEvent) -> bool:
-        """Alt+Shift+E: terminate the compositor."""
-        required = KeyboardModifier.ALT | KeyboardModifier.SHIFT
-        return (
-            event.state == WlKeyboard.key_state.pressed
-            and (keyboard.modifier & required) == required
-            and event_keysym(keyboard, event) == keysym("e")
+
+# --- compositor key bindings ---
+
+
+def handle_compositor_key(
+    ctx: Context, keyboard: Keyboard, event: KeyboardKeyEvent
+) -> bool:
+    """Intercept compositor-level shortcuts. Returns True if consumed."""
+    if is_exit_chord(keyboard, event):
+        ctx.running = False
+        return True
+    return False
+
+
+def is_exit_chord(keyboard: Keyboard, event: KeyboardKeyEvent) -> bool:
+    """Alt+Shift+E: terminate the compositor."""
+    required = KeyboardModifier.ALT | KeyboardModifier.SHIFT
+    return (
+        event.state == WlKeyboard.key_state.pressed
+        and (keyboard.modifier & required) == required
+        and event_keysym(keyboard, event) == keysym("e")
+    )
+
+
+# --- input ---
+
+
+def on_new_input(ctx: Context, _listener, device: InputDevice) -> None:
+    if device.type == InputDeviceType.KEYBOARD:
+        keyboard = Keyboard.from_input_device(device)
+        keyboard.set_keymap(ctx.xkb_keymap)
+        keyboard.set_repeat_info(25, 600)
+
+        def _on_key(_l, event: KeyboardKeyEvent) -> None:
+            if handle_compositor_key(ctx, keyboard, event):
+                return
+            ctx.seat.set_keyboard(keyboard)
+            ctx.seat.keyboard_notify_key(event)
+
+        def _on_modifiers(_l, _d) -> None:
+            ctx.seat.set_keyboard(keyboard)
+            ctx.seat.keyboard_notify_modifiers(keyboard.modifiers)
+
+        for sig, handler in (
+            (keyboard.key_event, _on_key),
+            (keyboard.modifiers_event, _on_modifiers),
+        ):
+            listener = Listener(handler)
+            sig.add(listener)
+            ctx.listeners.append(listener)
+
+        ctx.keyboards.append(keyboard)
+        ctx.seat.set_keyboard(keyboard)
+        ctx.seat.set_capabilities(
+            WlSeat.capability.keyboard | WlSeat.capability.pointer
+        )
+    elif device.type == InputDeviceType.POINTER:
+        ctx.cursor.attach_input_device(device)
+        ctx.seat.set_capabilities(
+            WlSeat.capability.keyboard | WlSeat.capability.pointer
         )
 
-    # --- input ---
 
-    def _on_new_input(self, _listener, device: InputDevice) -> None:
-        if device.type == InputDeviceType.KEYBOARD:
-            keyboard = Keyboard.from_input_device(device)
-            keyboard.set_keymap(self._xkb_keymap)
-            keyboard.set_repeat_info(25, 600)
+# --- pointer ---
 
-            def _on_key(_l, event: KeyboardKeyEvent) -> None:
-                if self._handle_compositor_key(keyboard, event):
-                    return
-                self.seat.set_keyboard(keyboard)
-                self.seat.keyboard_notify_key(event)
 
-            def _on_modifiers(_l, _d) -> None:
-                self.seat.set_keyboard(keyboard)
-                self.seat.keyboard_notify_modifiers(keyboard.modifiers)
+def on_cursor_motion(ctx: Context, _l, event: PointerMotionEvent) -> None:
+    ctx.cursor.move(event.delta_x, event.delta_y, input_device=event.pointer.base)
+    process_cursor_motion(ctx, event.time_msec)
 
-            for signal, handler in (
-                (keyboard.key_event, _on_key),
-                (keyboard.modifiers_event, _on_modifiers),
-            ):
-                listener = Listener(handler)
-                signal.add(listener)
-                self._listeners.append(listener)
 
-            self._keyboards.append(keyboard)
-            self.seat.set_keyboard(keyboard)
-            self.seat.set_capabilities(
-                WlSeat.capability.keyboard | WlSeat.capability.pointer
-            )
-        elif device.type == InputDeviceType.POINTER:
-            self.cursor.attach_input_device(device)
-            self.seat.set_capabilities(
-                WlSeat.capability.keyboard | WlSeat.capability.pointer
-            )
+def on_cursor_motion_absolute(
+    ctx: Context, _l, event: PointerMotionAbsoluteEvent
+) -> None:
+    ctx.cursor.warp(
+        WarpMode.AbsoluteClosest, event.x, event.y, input_device=event.pointer.base
+    )
+    process_cursor_motion(ctx, event.time_msec)
 
-    # --- pointer ---
 
-    def _on_cursor_motion(self, _l, event: PointerMotionEvent) -> None:
-        self.cursor.move(event.delta_x, event.delta_y, input_device=event.pointer.base)
-        self._process_cursor_motion(event.time_msec)
+def on_cursor_button(ctx: Context, _l, event: PointerButtonEvent) -> None:
+    if event.button_state == ButtonState.PRESSED:
+        view = view_at(ctx, ctx.cursor.x, ctx.cursor.y)
+        if view is not None:
+            focus_view(ctx, view)
+    ctx.seat.pointer_notify_button(event.time_msec, event.button, event.button_state)
 
-    def _on_cursor_motion_absolute(
-        self, _l, event: PointerMotionAbsoluteEvent
-    ) -> None:
-        self.cursor.warp(
-            WarpMode.AbsoluteClosest, event.x, event.y, input_device=event.pointer.base
-        )
-        self._process_cursor_motion(event.time_msec)
 
-    def _on_cursor_button(self, _l, event: PointerButtonEvent) -> None:
-        if event.button_state == ButtonState.PRESSED:
-            view = self._view_at(self.cursor.x, self.cursor.y)
-            if view is not None:
-                self._focus_view(view)
-        self.seat.pointer_notify_button(event.time_msec, event.button, event.button_state)
+def on_cursor_axis(ctx: Context, _l, event: PointerAxisEvent) -> None:
+    ctx.seat.pointer_notify_axis(
+        event.time_msec,
+        event.orientation,
+        event.delta,
+        event.delta_discrete,
+        event.source,
+    )
 
-    def _on_cursor_axis(self, _l, event: PointerAxisEvent) -> None:
-        self.seat.pointer_notify_axis(
-            event.time_msec,
-            event.orientation,
-            event.delta,
-            event.delta_discrete,
-            event.source,
-        )
 
-    def _on_cursor_frame(self, _l, _d) -> None:
-        self.seat.pointer_notify_frame()
+def on_cursor_frame(ctx: Context, _l, _d) -> None:
+    ctx.seat.pointer_notify_frame()
 
-    def _process_cursor_motion(self, time_msec: int) -> None:
-        surface, sx, sy = self._surface_at(self.cursor.x, self.cursor.y)
-        if surface is None:
-            # Default cursor image when over no client surface.
-            self.cursor.set_xcursor(self.cursor_manager, "default")
-            self.seat.pointer_notify_clear_focus()
-            return
-        self.seat.pointer_notify_enter(surface, sx, sy)
-        self.seat.pointer_notify_motion(time_msec, sx, sy)
 
-    def _surface_at(self, lx: float, ly: float):
-        result = self.scene.tree.node.node_at(lx, ly)
-        if result is None:
-            return None, 0.0, 0.0
-        node, sx, sy = result
-        if node.type != SceneNodeType.BUFFER:
-            return None, 0.0, 0.0
-        scene_buffer = SceneBuffer.from_node(node)
-        scene_surface = SceneSurface.from_buffer(scene_buffer)
-        if scene_surface is None:
-            return None, 0.0, 0.0
-        return scene_surface.surface, sx, sy
+def process_cursor_motion(ctx: Context, time_msec: int) -> None:
+    surface, sx, sy = surface_at(ctx, ctx.cursor.x, ctx.cursor.y)
+    if surface is None:
+        # Default cursor image when over no client surface.
+        ctx.cursor.set_xcursor(ctx.cursor_manager, "default")
+        ctx.seat.pointer_notify_clear_focus()
+        return
+    ctx.seat.pointer_notify_enter(surface, sx, sy)
+    ctx.seat.pointer_notify_motion(time_msec, sx, sy)
+
+
+def surface_at(ctx: Context, lx: float, ly: float):
+    result = ctx.scene.tree.node.node_at(lx, ly)
+    if result is None:
+        return None, 0.0, 0.0
+    node, sx, sy = result
+    if node.type != SceneNodeType.BUFFER:
+        return None, 0.0, 0.0
+    scene_buffer = SceneBuffer.from_node(node)
+    scene_surface = SceneSurface.from_buffer(scene_buffer)
+    if scene_surface is None:
+        return None, 0.0, 0.0
+    return scene_surface.surface, sx, sy
 
 
 # --- xkb keysym helpers ---
