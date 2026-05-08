@@ -14,6 +14,8 @@ import sys
 import logging
 from xkbcommon import xkb
 
+TERMINAL = "foot"
+
 
 def main() -> int:
     # Install signal handlers as early as possible so SIGINT during startup
@@ -211,7 +213,7 @@ def run(ctx: Context) -> None:
     # Detach via start_new_session so it survives our shutdown path
     # (os._exit) and doesn't receive our SIGINT.
     # pylint: disable-next=consider-using-with  # intentionally detached
-    subprocess.Popen(["foot"], start_new_session=True)
+    subprocess.Popen([TERMINAL], start_new_session=True)
 
     # Drive the wayland event loop ourselves so Python signal
     # handlers get a chance to fire between dispatches.
