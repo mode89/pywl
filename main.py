@@ -1,5 +1,10 @@
 """Minimal Wayland compositor using pywlroots."""
 
+# pylint: disable=import-error
+# pylint: disable=wrong-import-order
+# pylint: disable=wrong-import-position
+# pylint: disable=missing-function-docstring
+
 import argparse
 import os
 import signal
@@ -81,7 +86,6 @@ from wlroots.wlr_types.keyboard import (
     Keyboard,
     KeyboardKeyEvent,
     KeyboardModifier,
-    KeyboardModifiers,
 )
 from wlroots.wlr_types.output import CustomMode, Output, OutputEventRequestState
 from wlroots.wlr_types.scene import (
@@ -107,7 +111,7 @@ class View:
 
 
 @dataclass
-class Context:
+class Context:  # pylint: disable=too-many-instance-attributes
     """Compositor state. Passed as first argument to every handler."""
 
     interrupted: Callable[[], bool]
@@ -138,7 +142,9 @@ class Context:
     focused_view: View | None = None
 
 
-def create_context(interrupted: Callable[[], bool], *, scale: float = 1.0) -> Context:
+def create_context(  # pylint: disable=too-many-locals
+    interrupted: Callable[[], bool], *, scale: float = 1.0
+) -> Context:
     display = Display()
     (
         compositor,
@@ -174,9 +180,13 @@ def create_context(interrupted: Callable[[], bool], *, scale: float = 1.0) -> Co
         xkb_keymap=xkb_keymap,
     )
 
-    ctx.xdg_shell.new_surface_event.add(Listener(partial(on_new_xdg_surface, ctx)))
+    ctx.xdg_shell.new_surface_event.add(
+        Listener(partial(on_new_xdg_surface, ctx))
+    )
+    # pylint: disable=no-member  # backend signals are dynamic via cffi
     ctx.backend.new_output_event.add(Listener(partial(on_new_output, ctx)))
     ctx.backend.new_input_event.add(Listener(partial(on_new_input, ctx)))
+    # pylint: enable=no-member
 
     for sig, handler in (
         (ctx.cursor.motion_event, on_cursor_motion),
@@ -200,6 +210,7 @@ def run(ctx: Context) -> None:
     # Spawn a terminal so the empty session is immediately usable.
     # Detach via start_new_session so it survives our shutdown path
     # (os._exit) and doesn't receive our SIGINT.
+    # pylint: disable-next=consider-using-with  # intentionally detached
     subprocess.Popen(["foot"], start_new_session=True)
 
     # Drive the wayland event loop ourselves so Python signal
@@ -256,7 +267,9 @@ def on_new_output(ctx: Context, _listener, output: Output) -> None:
     output.request_state_event.add(Listener(_on_request_state))
 
 
-def on_new_xdg_surface(ctx: Context, _listener, xdg_surface: XdgSurface) -> None:
+def on_new_xdg_surface(
+    ctx: Context, _listener, xdg_surface: XdgSurface
+) -> None:
     if xdg_surface.role != XdgSurfaceRole.TOPLEVEL:
         return
     scene_tree = Scene.xdg_surface_create(ctx.scene.tree, xdg_surface)
@@ -397,7 +410,9 @@ def on_new_input(ctx: Context, _listener, device: InputDevice) -> None:
 
 
 def on_cursor_motion(ctx: Context, _l, event: PointerMotionEvent) -> None:
-    ctx.cursor.move(event.delta_x, event.delta_y, input_device=event.pointer.base)
+    ctx.cursor.move(
+        event.delta_x, event.delta_y, input_device=event.pointer.base
+    )
     process_cursor_motion(ctx, event.time_msec)
 
 
@@ -405,7 +420,10 @@ def on_cursor_motion_absolute(
     ctx: Context, _l, event: PointerMotionAbsoluteEvent
 ) -> None:
     ctx.cursor.warp(
-        WarpMode.AbsoluteClosest, event.x, event.y, input_device=event.pointer.base
+        WarpMode.AbsoluteClosest,
+        event.x,
+        event.y,
+        input_device=event.pointer.base,
     )
     process_cursor_motion(ctx, event.time_msec)
 
@@ -415,7 +433,9 @@ def on_cursor_button(ctx: Context, _l, event: PointerButtonEvent) -> None:
         view = view_at(ctx, ctx.cursor.x, ctx.cursor.y)
         if view is not None:
             focus_view(ctx, view)
-    ctx.seat.pointer_notify_button(event.time_msec, event.button, event.button_state)
+    ctx.seat.pointer_notify_button(
+        event.time_msec, event.button, event.button_state
+    )
 
 
 def on_cursor_axis(ctx: Context, _l, event: PointerAxisEvent) -> None:
@@ -462,15 +482,17 @@ def surface_at(ctx: Context, lx: float, ly: float):
 
 def keysym(name: str) -> int:
     """Return the xkb keysym for ``name`` (e.g. "q", "Escape", "F1")."""
-    return wlr_lib.xkb_keysym_from_name(name.encode(), wlr_lib.XKB_KEYSYM_NO_FLAGS)
+    return wlr_lib.xkb_keysym_from_name(
+        name.encode(), wlr_lib.XKB_KEYSYM_NO_FLAGS
+    )
 
 
 def event_keysym(keyboard: Keyboard, event: KeyboardKeyEvent) -> int:
     """Resolve a key event to a layout-aware, lowercased xkb keysym."""
     xkb_keycode = event.keycode + 8  # libinput → xkb (X11 +8 offset)
-    sym = wlr_lib.xkb_state_key_get_one_sym(
-        keyboard._ptr.xkb_state, xkb_keycode
-    )
+    # pylint: disable-next=protected-access  # _ptr is the only path to xkb_state
+    xkb_state = keyboard._ptr.xkb_state
+    sym = wlr_lib.xkb_state_key_get_one_sym(xkb_state, xkb_keycode)
     return wlr_lib.xkb_keysym_to_lower(sym)
 
 
