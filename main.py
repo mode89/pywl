@@ -121,6 +121,7 @@ class View:
     xdg_surface: XdgSurface
     scene_tree: SceneTree
     border: SceneRect
+    box: tuple[int, int, int, int] = (0, 0, 0, 0)  # last placed (x, y, w, h)
 
 
 @dataclass
@@ -387,6 +388,7 @@ def place_tile(view: View, x: int, y: int, w: int, h: int) -> None:
     view.border.set_size(w, h)
     view.scene_tree.node.set_position(x + b, y + b)
     view.xdg_surface.set_size(max(0, w - 2 * b), max(0, h - 2 * b))
+    view.box = (x, y, w, h)
 
 
 def place_fullscreen(view: View, x: int, y: int, w: int, h: int) -> None:
@@ -395,6 +397,7 @@ def place_fullscreen(view: View, x: int, y: int, w: int, h: int) -> None:
     view.border.set_size(w, h)
     view.scene_tree.node.set_position(x, y)
     view.xdg_surface.set_size(w, h)
+    view.box = (x, y, w, h)
 
 
 # --- focus ---
@@ -452,6 +455,8 @@ def handle_compositor_key(
     if is_toggle_fullscreen_chord(keyboard, event):
         toggle_fullscreen(ctx)
         return True
+    if handle_focus_direction_chord(ctx, keyboard, event):
+        return True
     return False
 
 
@@ -493,6 +498,58 @@ def toggle_fullscreen(ctx: Context) -> None:
         return
     ctx.fullscreen_view = None if ctx.fullscreen_view is view else view
     apply_tiling(ctx)
+
+
+def handle_focus_direction_chord(
+    ctx: Context, keyboard: Keyboard, event: KeyboardKeyEvent
+) -> bool:
+    """Alt+H/J/K/L: move focus left/down/up/right by view geometry."""
+    if event.state != WlKeyboard.key_state.pressed:
+        return False
+    if not (keyboard.modifier & KeyboardModifier.ALT):
+        return False
+    directions = {
+        keysym("h"): (-1, 0),
+        keysym("j"): (0, 1),
+        keysym("k"): (0, -1),
+        keysym("l"): (1, 0),
+    }
+    direction = directions.get(event_keysym(keyboard, event))
+    if direction is None:
+        return False
+    focus_in_direction(ctx, *direction)
+    return True
+
+
+def focus_in_direction(ctx: Context, dx: int, dy: int) -> None:
+    """Focus the nearest view whose center lies in the (dx, dy) half-plane."""
+    current = ctx.focused_view
+    if current is None or len(ctx.views) < 2:
+        return
+    cx, cy = view_center(current)
+    best: tuple[float, View] | None = None
+    for view in ctx.views:
+        if view is current:
+            continue
+        vx, vy = view_center(view)
+        if dx > 0 and vx <= cx:
+            continue
+        if dx < 0 and vx >= cx:
+            continue
+        if dy > 0 and vy <= cy:
+            continue
+        if dy < 0 and vy >= cy:
+            continue
+        dist = (vx - cx) ** 2 + (vy - cy) ** 2
+        if best is None or dist < best[0]:
+            best = (dist, view)
+    if best is not None:
+        focus_view(ctx, best[1])
+
+
+def view_center(view: View) -> tuple[float, float]:
+    x, y, w, h = view.box
+    return (x + w / 2, y + h / 2)
 
 
 def spawn_terminal() -> None:
