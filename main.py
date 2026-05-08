@@ -69,6 +69,7 @@ from typing import Callable
 from pywayland.protocol.wayland import WlKeyboard, WlSeat
 from pywayland.server import Display, Listener
 from wlroots import helper as wlroots_helper
+from wlroots import ffi as wlr_ffi
 from wlroots import lib as wlr_lib
 from wlroots.util.clock import Timespec
 from wlroots.util.log import log_init
@@ -96,12 +97,23 @@ from wlroots.wlr_types.scene import (
     SceneNode,
     SceneNodeType,
     SceneOutput,
+    SceneRect,
     SceneSurface,
     SceneTree,
 )
 from wlroots.wlr_types.seat import Seat
 from wlroots.wlr_types.xcursor_manager import XCursorManager
+from wlroots.wlr_types.xdg_decoration_v1 import (
+    XdgDecorationManagerV1,
+    XdgToplevelDecorationV1,
+    XdgToplevelDecorationV1Mode,
+)
 from wlroots.wlr_types.xdg_shell import XdgShell, XdgSurface, XdgSurfaceRole
+
+
+BORDER_WIDTH = 2
+BORDER_COLOR = (0.2, 0.2, 0.2, 1.0)
+BORDER_COLOR_FOCUSED = (0.298, 0.471, 0.6, 1.0)
 
 
 @dataclass(eq=False)
@@ -110,6 +122,7 @@ class View:
 
     xdg_surface: XdgSurface
     scene_tree: SceneTree
+    border: SceneRect
 
 
 @dataclass
@@ -130,6 +143,7 @@ class Context:  # pylint: disable=too-many-instance-attributes
     data_device_manager: DataDeviceManager
     seat: Seat
     xdg_shell: XdgShell
+    xdg_decoration_manager: XdgDecorationManagerV1
     cursor: Cursor
     cursor_manager: XCursorManager
     xkb_context: object
@@ -176,6 +190,7 @@ def create_context(  # pylint: disable=too-many-locals
         data_device_manager=DataDeviceManager(display),
         seat=Seat(display, "seat0"),
         xdg_shell=XdgShell(display),
+        xdg_decoration_manager=XdgDecorationManagerV1.create(display),
         cursor=Cursor(output_layout),
         cursor_manager=XCursorManager(None, 24),
         xkb_context=xkb_context,
@@ -184,6 +199,9 @@ def create_context(  # pylint: disable=too-many-locals
 
     ctx.xdg_shell.new_surface_event.add(
         Listener(partial(on_new_xdg_surface, ctx))
+    )
+    ctx.xdg_decoration_manager.new_toplevel_decoration_event.add(
+        Listener(on_new_toplevel_decoration)
     )
     # pylint: disable=no-member  # backend signals are dynamic via cffi
     ctx.backend.new_output_event.add(Listener(partial(on_new_output, ctx)))
@@ -269,13 +287,27 @@ def on_new_output(ctx: Context, _listener, output: Output) -> None:
     output.request_state_event.add(Listener(_on_request_state))
 
 
+def on_new_toplevel_decoration(
+    _listener, decoration: XdgToplevelDecorationV1
+) -> None:
+    # Force server-side decorations; we draw none, so toplevels are borderless.
+    decoration.set_mode(XdgToplevelDecorationV1Mode.SERVER_SIDE)
+
+
 def on_new_xdg_surface(
     ctx: Context, _listener, xdg_surface: XdgSurface
 ) -> None:
     if xdg_surface.role != XdgSurfaceRole.TOPLEVEL:
         return
     scene_tree = Scene.xdg_surface_create(ctx.scene.tree, xdg_surface)
-    view = View(xdg_surface=xdg_surface, scene_tree=scene_tree)
+    border = SceneRect(
+        ctx.scene.tree, 0, 0, wlr_ffi.new("float[4]", list(BORDER_COLOR))
+    )
+    # Render border below the surface so it shows only as a frame around it.
+    border.node.place_below(scene_tree.node)
+    view = View(
+        xdg_surface=xdg_surface, scene_tree=scene_tree, border=border
+    )
     # Tag the scene node so click hit-tests can recover the view by
     # walking up parents from whatever (sub)surface was hit.
     scene_tree.node.data = view
@@ -288,6 +320,7 @@ def on_new_xdg_surface(
         focus_view(ctx, view)
 
     def _on_unmap(_l, _d) -> None:
+        view.border.node.destroy()
         if view in ctx.views:
             ctx.views.remove(view)
             apply_tiling(ctx)
@@ -321,13 +354,11 @@ def apply_tiling(ctx: Context) -> None:
     box = ctx.output_layout.get_box(ctx.outputs[0])
     master, *stack = ctx.views
     if not stack:
-        master.scene_tree.node.set_position(box.x, box.y)
-        master.xdg_surface.set_size(box.width, box.height)
+        place_tile(master, box.x, box.y, box.width, box.height)
         return
     master_w = box.width // 2
     stack_w = box.width - master_w
-    master.scene_tree.node.set_position(box.x, box.y)
-    master.xdg_surface.set_size(master_w, box.height)
+    place_tile(master, box.x, box.y, master_w, box.height)
     n = len(stack)
     tile_h = box.height // n
     remainder = box.height - tile_h * n
@@ -335,9 +366,23 @@ def apply_tiling(ctx: Context) -> None:
     stack_x = box.x + master_w
     for i, view in enumerate(stack):
         h = tile_h + (1 if i < remainder else 0)
-        view.scene_tree.node.set_position(stack_x, y)
-        view.xdg_surface.set_size(stack_w, h)
+        place_tile(view, stack_x, y, stack_w, h)
         y += h
+
+
+def set_border_color(
+    view: View, color: tuple[float, float, float, float]
+) -> None:
+    view.border.set_color(wlr_ffi.new("float[4]", list(color)))
+
+
+def place_tile(view: View, x: int, y: int, w: int, h: int) -> None:
+    """Position a view at (x, y) with size (w, h), framed by a border."""
+    b = BORDER_WIDTH
+    view.border.node.set_position(x, y)
+    view.border.set_size(w, h)
+    view.scene_tree.node.set_position(x + b, y + b)
+    view.xdg_surface.set_size(max(0, w - 2 * b), max(0, h - 2 * b))
 
 
 # --- focus ---
@@ -349,8 +394,10 @@ def focus_view(ctx: Context, view: View) -> None:
     prev = ctx.focused_view
     if prev is not None:
         prev.xdg_surface.set_activated(False)
+        set_border_color(prev, BORDER_COLOR)
     view.scene_tree.node.raise_to_top()
     view.xdg_surface.set_activated(True)
+    set_border_color(view, BORDER_COLOR_FOCUSED)
     ctx.focused_view = view
     keyboard = ctx.seat.get_keyboard()
     if keyboard is not None:
