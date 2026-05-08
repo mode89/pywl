@@ -14,8 +14,6 @@ import sys
 import logging
 from xkbcommon import xkb
 
-TERMINAL = "foot"
-
 
 def main() -> int:
     # Install signal handlers as early as possible so SIGINT during startup
@@ -228,10 +226,7 @@ def run(ctx: Context) -> None:
     print(f"pywl: running on WAYLAND_DISPLAY={socket}")
 
     # Spawn a terminal so the empty session is immediately usable.
-    # Detach via start_new_session so it survives our shutdown path
-    # (os._exit) and doesn't receive our SIGINT.
-    # pylint: disable-next=consider-using-with  # intentionally detached
-    subprocess.Popen([TERMINAL], start_new_session=True)
+    spawn_terminal()
 
     # Drive the wayland event loop ourselves so Python signal
     # handlers get a chance to fire between dispatches.
@@ -434,6 +429,9 @@ def handle_compositor_key(
     if is_exit_chord(keyboard, event):
         ctx.running = False
         return True
+    if is_spawn_terminal_chord(keyboard, event):
+        spawn_terminal()
+        return True
     return False
 
 
@@ -445,6 +443,30 @@ def is_exit_chord(keyboard: Keyboard, event: KeyboardKeyEvent) -> bool:
         and (keyboard.modifier & required) == required
         and event_keysym(keyboard, event) == keysym("e")
     )
+
+
+def is_spawn_terminal_chord(
+    keyboard: Keyboard, event: KeyboardKeyEvent
+) -> bool:
+    """Alt+Enter: spawn a new terminal."""
+    return (
+        event.state == WlKeyboard.key_state.pressed
+        and bool(keyboard.modifier & KeyboardModifier.ALT)
+        and event_keysym(keyboard, event) == keysym("Return")
+    )
+
+
+def spawn_terminal() -> None:
+    # Detach: survive compositor shutdown (os._exit) and ignore our SIGINT.
+    for var in ["TERM", "TERMINAL"]:
+        if cmd := os.getenv(var):
+            try:
+                # pylint: disable-next=consider-using-with
+                subprocess.Popen([cmd], start_new_session=True)
+                return
+            except FileNotFoundError:
+                continue
+    logging.warning("no preferred terminal found")
 
 
 # --- input ---
