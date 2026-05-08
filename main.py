@@ -2,6 +2,7 @@
 
 import os
 import signal
+import subprocess
 import sys
 
 import logging
@@ -124,6 +125,11 @@ class Compositor:
         socket = self.display.add_socket().decode()
         os.environ["WAYLAND_DISPLAY"] = socket
         print(f"pywl: running on WAYLAND_DISPLAY={socket}")
+
+        # Spawn a terminal so the empty session is immediately usable.
+        # Detach via start_new_session so it survives our shutdown path
+        # (os._exit) and doesn't receive our SIGINT.
+        subprocess.Popen(["alacritty"], start_new_session=True)
 
         # Drive the wayland event loop ourselves so Python signal
         # handlers get a chance to fire between dispatches.

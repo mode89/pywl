@@ -5,5 +5,6 @@ pkgs.mkShell {
     (python3.withPackages (ps: with ps; [
       pywlroots
     ]))
+    alacritty
   ];
 }
