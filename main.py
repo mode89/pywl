@@ -43,8 +43,23 @@ def main(startup_cmd: str = "alacritty") -> int:
 
     xdg_shell = lib.wlr_xdg_shell_create(display, 3)
 
+    cursor = lib.wlr_cursor_create()
+    lib.wlr_cursor_attach_output_layout(cursor, output_layout)
+    xcursor_mgr = lib.wlr_xcursor_manager_create(ffi.NULL, 24)
+    lib.wlr_xcursor_manager_load(xcursor_mgr, 1.0)
+
     # First (and assumed only) output, populated on the new_output event.
     primary_output = [ffi.NULL]
+
+    # toplevels: maps an integer key (stored as scene_tree.node.data) to
+    # (xdg_toplevel, scene_tree). Used to recover the toplevel that owns
+    # a hit-tested scene node.
+    toplevels: dict = {}
+    next_key = [1]
+
+    # Interactive move state, or None.
+    # Tuple: (xdg_toplevel, scene_tree, grab_dx, grab_dy)
+    move = [None]
 
     # --- Output handling ----------------------------------------------------
     def on_frame_for(wlr_output):
@@ -102,8 +117,12 @@ def main(startup_cmd: str = "alacritty") -> int:
         def on_key(data):
             ev = ffi.cast("struct wlr_keyboard_key_event *", data)
             lib.wlr_seat_set_keyboard(seat, kb)
-            lib.wlr_seat_keyboard_notify_key(seat, ev.time_msec,
-                ev.keycode, ev.state)
+            lib.wlr_seat_keyboard_notify_key(
+                seat,
+                lib.pywl_key_event_time_msec(ev),
+                lib.pywl_key_event_keycode(ev),
+                lib.pywl_key_event_state(ev),
+            )
 
         add_listener(lib.pywl_keyboard_modifiers_signal(kb), on_modifiers)
         add_listener(lib.pywl_keyboard_key_signal(kb), on_key)
@@ -112,8 +131,11 @@ def main(startup_cmd: str = "alacritty") -> int:
 
     def on_new_input(data):
         device = ffi.cast("struct wlr_input_device *", data)
-        if lib.pywl_input_device_type(device) == lib.WLR_INPUT_DEVICE_KEYBOARD:
+        dtype = lib.pywl_input_device_type(device)
+        if dtype == lib.WLR_INPUT_DEVICE_KEYBOARD:
             attach_keyboard(device)
+        elif dtype == lib.WLR_INPUT_DEVICE_POINTER:
+            lib.wlr_cursor_attach_input_device(cursor, device)
         caps = lib.WL_SEAT_CAPABILITY_POINTER
         if has_keyboard[0]:
             caps |= lib.WL_SEAT_CAPABILITY_KEYBOARD
@@ -125,6 +147,118 @@ def main(startup_cmd: str = "alacritty") -> int:
         # NULL keycodes/modifiers means "no keys held, no modifiers active"
         # at focus-enter time; subsequent key/modifier events refresh state.
         lib.wlr_seat_keyboard_notify_enter(seat, surface, ffi.NULL, 0, ffi.NULL)
+
+    # --- Cursor / pointer ---------------------------------------------------
+    def surface_at(lx, ly):
+        """Return (info, surface, sx, sy) where info is (xdg, scene_tree),
+        or None if (lx, ly) doesn't land on a known toplevel's surface."""
+        sx = ffi.new("double *")
+        sy = ffi.new("double *")
+        root = lib.pywl_scene_tree_node(lib.pywl_scene_tree(scene))
+        node = lib.wlr_scene_node_at(root, lx, ly, sx, sy)
+        if node == ffi.NULL:
+            return None
+        if lib.pywl_scene_node_type(node) != lib.WLR_SCENE_NODE_BUFFER:
+            return None
+        buf = lib.wlr_scene_buffer_from_node(node)
+        ss = lib.wlr_scene_surface_try_from_buffer(buf)
+        if ss == ffi.NULL:
+            return None
+        # Walk up the parent chain to the first scene_tree whose node.data
+        # we set when creating the toplevel.
+        tree = lib.pywl_scene_node_parent(node)
+        while tree != ffi.NULL and \
+                lib.pywl_scene_node_data(
+                    lib.pywl_scene_tree_node(tree)) == ffi.NULL:
+            tree = lib.pywl_scene_node_parent(lib.pywl_scene_tree_node(tree))
+        if tree == ffi.NULL:
+            return None
+        data = lib.pywl_scene_node_data(lib.pywl_scene_tree_node(tree))
+        info = toplevels.get(int(ffi.cast("uintptr_t", data)))
+        if info is None:
+            return None
+        return info, lib.pywl_scene_surface_surface(ss), sx[0], sy[0]
+
+    def process_cursor_motion(time_msec):
+        if move[0] is not None:
+            _xdg, st, gx, gy = move[0]
+            x = lib.pywl_cursor_x(cursor) - gx
+            y = lib.pywl_cursor_y(cursor) - gy
+            lib.wlr_scene_node_set_position(
+                lib.pywl_scene_tree_node(st), int(x), int(y))
+            return
+        hit = surface_at(lib.pywl_cursor_x(cursor), lib.pywl_cursor_y(cursor))
+        if hit is None:
+            lib.wlr_cursor_set_xcursor(cursor, xcursor_mgr, b"default")
+            lib.wlr_seat_pointer_clear_focus(seat)
+            return
+        _info, surface, sx, sy = hit
+        lib.wlr_seat_pointer_notify_enter(seat, surface, sx, sy)
+        lib.wlr_seat_pointer_notify_motion(seat, time_msec, sx, sy)
+
+    def on_cursor_motion(data):
+        ev = ffi.cast("struct wlr_pointer_motion_event *", data)
+        lib.wlr_cursor_move(
+            cursor, ffi.NULL,
+            lib.pywl_pmotion_delta_x(ev), lib.pywl_pmotion_delta_y(ev))
+        process_cursor_motion(lib.pywl_pmotion_time_msec(ev))
+
+    def on_cursor_motion_absolute(data):
+        ev = ffi.cast("struct wlr_pointer_motion_absolute_event *", data)
+        lib.wlr_cursor_warp_absolute(
+            cursor, ffi.NULL,
+            lib.pywl_pmotion_abs_x(ev), lib.pywl_pmotion_abs_y(ev))
+        process_cursor_motion(lib.pywl_pmotion_abs_time_msec(ev))
+
+    def on_cursor_button(data):
+        ev = ffi.cast("struct wlr_pointer_button_event *", data)
+        state = lib.pywl_pbutton_state(ev)
+        button = lib.pywl_pbutton_button(ev)
+        time_msec = lib.pywl_pbutton_time_msec(ev)
+        if state == lib.WL_POINTER_BUTTON_STATE_PRESSED:
+            kb = lib.wlr_seat_get_keyboard(seat)
+            mods = lib.wlr_keyboard_get_modifiers(kb) if kb != ffi.NULL else 0
+            hit = surface_at(
+                lib.pywl_cursor_x(cursor), lib.pywl_cursor_y(cursor))
+            if hit is not None:
+                (xdg, st), surface, _sx, _sy = hit
+                if (mods & lib.WLR_MODIFIER_ALT) and button == lib.BTN_LEFT:
+                    node = lib.pywl_scene_tree_node(st)
+                    gx = lib.pywl_cursor_x(cursor) - lib.pywl_scene_node_x(node)
+                    gy = lib.pywl_cursor_y(cursor) - lib.pywl_scene_node_y(node)
+                    move[0] = (xdg, st, gx, gy)
+                    return  # don't forward to client
+                lib.wlr_scene_node_raise_to_top(lib.pywl_scene_tree_node(st))
+                focus_surface(surface)
+            else:
+                lib.wlr_seat_keyboard_clear_focus(seat)
+        else:  # release
+            if move[0] is not None:
+                move[0] = None
+                return
+        lib.wlr_seat_pointer_notify_button(seat, time_msec, button, state)
+
+    def on_cursor_axis(data):
+        ev = ffi.cast("struct wlr_pointer_axis_event *", data)
+        lib.wlr_seat_pointer_notify_axis(
+            seat,
+            lib.pywl_paxis_time_msec(ev),
+            lib.pywl_paxis_orientation(ev),
+            lib.pywl_paxis_delta(ev),
+            lib.pywl_paxis_delta_discrete(ev),
+            lib.pywl_paxis_source(ev),
+            lib.pywl_paxis_relative_direction(ev),
+        )
+
+    def on_cursor_frame(_data):
+        lib.wlr_seat_pointer_notify_frame(seat)
+
+    add_listener(lib.pywl_cursor_motion(cursor), on_cursor_motion)
+    add_listener(
+        lib.pywl_cursor_motion_absolute(cursor), on_cursor_motion_absolute)
+    add_listener(lib.pywl_cursor_button(cursor), on_cursor_button)
+    add_listener(lib.pywl_cursor_axis(cursor), on_cursor_axis)
+    add_listener(lib.pywl_cursor_frame(cursor), on_cursor_frame)
 
     # --- xdg-shell handling -------------------------------------------------
     def commit_handler_for(xdg_toplevel, scene_tree):
@@ -152,6 +286,14 @@ def main(startup_cmd: str = "alacritty") -> int:
         base = lib.pywl_toplevel_base(xdg_toplevel)
         scene_tree = lib.wlr_scene_xdg_surface_create(
             lib.pywl_scene_tree(scene), base)
+
+        # Tag the scene_tree with an integer key so hit-testing can find
+        # the owning toplevel via scene_node.data.
+        key = next_key[0]
+        next_key[0] += 1
+        toplevels[key] = (xdg_toplevel, scene_tree)
+        lib.pywl_scene_tree_set_data(scene_tree, ffi.cast("void *", key))
+
         surface = lib.pywl_xdg_surface_surface(base)
 
         # Listeners attached to this toplevel's surface signals must be
@@ -169,6 +311,9 @@ def main(startup_cmd: str = "alacritty") -> int:
             for k in keys:
                 remove_listener(k)
             remove_listener(destroy_key)
+            toplevels.pop(key, None)
+            if move[0] is not None and move[0][0] == xdg_toplevel:
+                move[0] = None
 
         destroy_key = add_listener(
             lib.pywl_xdg_toplevel_destroy(xdg_toplevel), on_destroy)

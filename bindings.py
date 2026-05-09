@@ -66,18 +66,8 @@ struct wlr_input_device;
 struct wlr_keyboard;
 struct xkb_context;
 struct xkb_keymap;
-struct wlr_keyboard_modifiers {
-    uint32_t depressed;
-    uint32_t latched;
-    uint32_t locked;
-    uint32_t group;
-};
-struct wlr_keyboard_key_event {
-    uint32_t time_msec;
-    uint32_t keycode;
-    bool update_state;
-    uint32_t state;
-};
+struct wlr_keyboard_modifiers;
+struct wlr_keyboard_key_event;
 
 /* libwayland-server */
 void wl_list_remove(struct wl_list *);
@@ -158,6 +148,50 @@ struct wlr_keyboard *wlr_keyboard_from_input_device(struct wlr_input_device *);
 bool wlr_keyboard_set_keymap(struct wlr_keyboard *, struct xkb_keymap *);
 void wlr_keyboard_set_repeat_info(
         struct wlr_keyboard *, int32_t rate_hz, int32_t delay_ms);
+uint32_t wlr_keyboard_get_modifiers(struct wlr_keyboard *);
+struct wlr_keyboard *wlr_seat_get_keyboard(struct wlr_seat *);
+void wlr_seat_keyboard_clear_focus(struct wlr_seat *);
+
+/* Cursor / pointer (all opaque; fields read via pywl_* accessors) */
+struct wlr_cursor;
+struct wlr_xcursor_manager;
+struct wlr_pointer;
+struct wlr_pointer_motion_event;
+struct wlr_pointer_motion_absolute_event;
+struct wlr_pointer_button_event;
+struct wlr_pointer_axis_event;
+
+struct wlr_cursor *wlr_cursor_create(void);
+void wlr_cursor_destroy(struct wlr_cursor *);
+void wlr_cursor_attach_output_layout(
+        struct wlr_cursor *, struct wlr_output_layout *);
+void wlr_cursor_attach_input_device(
+        struct wlr_cursor *, struct wlr_input_device *);
+void wlr_cursor_move(struct wlr_cursor *, struct wlr_input_device *,
+        double delta_x, double delta_y);
+void wlr_cursor_warp_absolute(struct wlr_cursor *, struct wlr_input_device *,
+        double x, double y);
+void wlr_cursor_set_xcursor(struct wlr_cursor *,
+        struct wlr_xcursor_manager *, const char *);
+
+struct wlr_xcursor_manager *wlr_xcursor_manager_create(
+        const char *name, uint32_t size);
+void wlr_xcursor_manager_destroy(struct wlr_xcursor_manager *);
+bool wlr_xcursor_manager_load(struct wlr_xcursor_manager *, float scale);
+
+void wlr_seat_pointer_notify_enter(struct wlr_seat *, struct wlr_surface *,
+        double sx, double sy);
+void wlr_seat_pointer_notify_motion(
+        struct wlr_seat *, uint32_t time_msec, double sx, double sy);
+uint32_t wlr_seat_pointer_notify_button(struct wlr_seat *,
+        uint32_t time_msec, uint32_t button, uint32_t state);
+void wlr_seat_pointer_notify_axis(struct wlr_seat *, uint32_t time_msec,
+        uint32_t orientation, double value, int32_t value_discrete,
+        uint32_t source, uint32_t relative_direction);
+void wlr_seat_pointer_notify_frame(struct wlr_seat *);
+void wlr_seat_pointer_clear_focus(struct wlr_seat *);
+
+void wlr_scene_node_raise_to_top(struct wlr_scene_node *);
 
 struct xkb_context *xkb_context_new(int flags);
 void xkb_context_unref(struct xkb_context *);
@@ -177,6 +211,15 @@ void wlr_log_init(int verbosity, void *callback);
 /* wl_seat capability bits */
 #define WL_SEAT_CAPABILITY_POINTER 1
 #define WL_SEAT_CAPABILITY_KEYBOARD 2
+
+/* wl_pointer button state */
+#define WL_POINTER_BUTTON_STATE_PRESSED 1
+
+/* enum wlr_keyboard_modifier */
+#define WLR_MODIFIER_ALT 8
+
+/* linux/input-event-codes.h */
+#define BTN_LEFT 0x110
 
 /* our helpers */
 void pywl_signal_add(struct wl_signal *, struct wl_listener *);
@@ -202,6 +245,37 @@ struct wlr_scene_node *pywl_scene_tree_node(struct wlr_scene_tree *);
 
 struct wl_signal *pywl_xdg_toplevel_destroy(struct wlr_xdg_toplevel *);
 
+/* cursor signals + position */
+struct wl_signal *pywl_cursor_motion(struct wlr_cursor *);
+struct wl_signal *pywl_cursor_motion_absolute(struct wlr_cursor *);
+struct wl_signal *pywl_cursor_button(struct wlr_cursor *);
+struct wl_signal *pywl_cursor_axis(struct wlr_cursor *);
+struct wl_signal *pywl_cursor_frame(struct wlr_cursor *);
+double pywl_cursor_x(struct wlr_cursor *);
+double pywl_cursor_y(struct wlr_cursor *);
+
+/* scene_node position + opaque user-data, used to recover the toplevel
+   that owns a hit-tested node. */
+int pywl_scene_node_x(struct wlr_scene_node *);
+int pywl_scene_node_y(struct wlr_scene_node *);
+int pywl_scene_node_type(struct wlr_scene_node *);
+struct wlr_scene_tree *pywl_scene_node_parent(struct wlr_scene_node *);
+void *pywl_scene_node_data(struct wlr_scene_node *);
+void pywl_scene_tree_set_data(struct wlr_scene_tree *, void *);
+struct wlr_surface *pywl_scene_surface_surface(struct wlr_scene_surface *);
+
+/* hit-test entry point (real wlroots export, declared near accessors) */
+struct wlr_scene_buffer;
+struct wlr_scene_surface;
+struct wlr_scene_node *wlr_scene_node_at(struct wlr_scene_node *root,
+        double lx, double ly, double *nx, double *ny);
+struct wlr_scene_buffer *wlr_scene_buffer_from_node(struct wlr_scene_node *);
+struct wlr_scene_surface *wlr_scene_surface_try_from_buffer(
+        struct wlr_scene_buffer *);
+
+/* enum wlr_scene_node_type */
+#define WLR_SCENE_NODE_BUFFER 2
+
 /* keyboard input field accessors (struct layout we don't want to declare) */
 struct wl_signal *pywl_backend_new_input(struct wlr_backend *);
 struct wl_signal *pywl_surface_map(struct wlr_surface *);
@@ -213,6 +287,30 @@ struct wlr_keyboard_modifiers *pywl_keyboard_modifiers_ptr(
 uint32_t *pywl_keyboard_keycodes(struct wlr_keyboard *);
 size_t pywl_keyboard_num_keycodes(struct wlr_keyboard *);
 
+/* event field accessors (kept opaque to avoid depending on layout) */
+uint32_t pywl_key_event_time_msec(struct wlr_keyboard_key_event *);
+uint32_t pywl_key_event_keycode(struct wlr_keyboard_key_event *);
+uint32_t pywl_key_event_state(struct wlr_keyboard_key_event *);
+
+uint32_t pywl_pmotion_time_msec(struct wlr_pointer_motion_event *);
+double pywl_pmotion_delta_x(struct wlr_pointer_motion_event *);
+double pywl_pmotion_delta_y(struct wlr_pointer_motion_event *);
+
+uint32_t pywl_pmotion_abs_time_msec(struct wlr_pointer_motion_absolute_event *);
+double pywl_pmotion_abs_x(struct wlr_pointer_motion_absolute_event *);
+double pywl_pmotion_abs_y(struct wlr_pointer_motion_absolute_event *);
+
+uint32_t pywl_pbutton_time_msec(struct wlr_pointer_button_event *);
+uint32_t pywl_pbutton_button(struct wlr_pointer_button_event *);
+uint32_t pywl_pbutton_state(struct wlr_pointer_button_event *);
+
+uint32_t pywl_paxis_time_msec(struct wlr_pointer_axis_event *);
+uint32_t pywl_paxis_source(struct wlr_pointer_axis_event *);
+uint32_t pywl_paxis_orientation(struct wlr_pointer_axis_event *);
+uint32_t pywl_paxis_relative_direction(struct wlr_pointer_axis_event *);
+double pywl_paxis_delta(struct wlr_pointer_axis_event *);
+int32_t pywl_paxis_delta_discrete(struct wlr_pointer_axis_event *);
+
 extern "Python" void _pywl_dispatch(struct wl_listener *, void *);
 """
 
@@ -223,6 +321,7 @@ SOURCE = r"""
 #include <stdbool.h>
 #include <stdlib.h>
 #include <time.h>
+#include <linux/input-event-codes.h>
 #include <wayland-server-core.h>
 #include <wlr/backend.h>
 #include <wlr/render/allocator.h>
@@ -236,6 +335,9 @@ SOURCE = r"""
 #include <wlr/types/wlr_subcompositor.h>
 #include <wlr/types/wlr_input_device.h>
 #include <wlr/types/wlr_keyboard.h>
+#include <wlr/types/wlr_pointer.h>
+#include <wlr/types/wlr_cursor.h>
+#include <wlr/types/wlr_xcursor_manager.h>
 #include <wlr/types/wlr_xdg_shell.h>
 #include <wlr/util/log.h>
 
@@ -303,6 +405,66 @@ size_t pywl_keyboard_num_keycodes(struct wlr_keyboard *k) {
     return k->num_keycodes;
 }
 
+uint32_t pywl_key_event_time_msec(struct wlr_keyboard_key_event *e) {
+    return e->time_msec;
+}
+uint32_t pywl_key_event_keycode(struct wlr_keyboard_key_event *e) {
+    return e->keycode;
+}
+uint32_t pywl_key_event_state(struct wlr_keyboard_key_event *e) {
+    return e->state;
+}
+
+uint32_t pywl_pmotion_time_msec(struct wlr_pointer_motion_event *e) {
+    return e->time_msec;
+}
+double pywl_pmotion_delta_x(struct wlr_pointer_motion_event *e) {
+    return e->delta_x;
+}
+double pywl_pmotion_delta_y(struct wlr_pointer_motion_event *e) {
+    return e->delta_y;
+}
+
+uint32_t pywl_pmotion_abs_time_msec(
+        struct wlr_pointer_motion_absolute_event *e) {
+    return e->time_msec;
+}
+double pywl_pmotion_abs_x(struct wlr_pointer_motion_absolute_event *e) {
+    return e->x;
+}
+double pywl_pmotion_abs_y(struct wlr_pointer_motion_absolute_event *e) {
+    return e->y;
+}
+
+uint32_t pywl_pbutton_time_msec(struct wlr_pointer_button_event *e) {
+    return e->time_msec;
+}
+uint32_t pywl_pbutton_button(struct wlr_pointer_button_event *e) {
+    return e->button;
+}
+uint32_t pywl_pbutton_state(struct wlr_pointer_button_event *e) {
+    return e->state;
+}
+
+uint32_t pywl_paxis_time_msec(struct wlr_pointer_axis_event *e) {
+    return e->time_msec;
+}
+uint32_t pywl_paxis_source(struct wlr_pointer_axis_event *e) {
+    return e->source;
+}
+uint32_t pywl_paxis_orientation(struct wlr_pointer_axis_event *e) {
+    return e->orientation;
+}
+uint32_t pywl_paxis_relative_direction(struct wlr_pointer_axis_event *e) {
+    return e->relative_direction;
+}
+double pywl_paxis_delta(struct wlr_pointer_axis_event *e) {
+    return e->delta;
+}
+int32_t pywl_paxis_delta_discrete(struct wlr_pointer_axis_event *e) {
+    return e->delta_discrete;
+}
+
 int pywl_output_width(struct wlr_output *o) { return o->width; }
 int pywl_output_height(struct wlr_output *o) { return o->height; }
 struct wlr_scene_node *pywl_scene_tree_node(struct wlr_scene_tree *t) {
@@ -310,6 +472,38 @@ struct wlr_scene_node *pywl_scene_tree_node(struct wlr_scene_tree *t) {
 }
 struct wl_signal *pywl_xdg_toplevel_destroy(struct wlr_xdg_toplevel *t) {
     return &t->events.destroy;
+}
+
+struct wl_signal *pywl_cursor_motion(struct wlr_cursor *c) {
+    return &c->events.motion;
+}
+struct wl_signal *pywl_cursor_motion_absolute(struct wlr_cursor *c) {
+    return &c->events.motion_absolute;
+}
+struct wl_signal *pywl_cursor_button(struct wlr_cursor *c) {
+    return &c->events.button;
+}
+struct wl_signal *pywl_cursor_axis(struct wlr_cursor *c) {
+    return &c->events.axis;
+}
+struct wl_signal *pywl_cursor_frame(struct wlr_cursor *c) {
+    return &c->events.frame;
+}
+double pywl_cursor_x(struct wlr_cursor *c) { return c->x; }
+double pywl_cursor_y(struct wlr_cursor *c) { return c->y; }
+
+int pywl_scene_node_x(struct wlr_scene_node *n) { return n->x; }
+int pywl_scene_node_y(struct wlr_scene_node *n) { return n->y; }
+int pywl_scene_node_type(struct wlr_scene_node *n) { return n->type; }
+struct wlr_scene_tree *pywl_scene_node_parent(struct wlr_scene_node *n) {
+    return n->parent;
+}
+void *pywl_scene_node_data(struct wlr_scene_node *n) { return n->data; }
+void pywl_scene_tree_set_data(struct wlr_scene_tree *t, void *d) {
+    t->node.data = d;
+}
+struct wlr_surface *pywl_scene_surface_surface(struct wlr_scene_surface *s) {
+    return s->surface;
 }
 """
 
