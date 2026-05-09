@@ -29,15 +29,13 @@
   users.users.root.password = "root";
 
   # Tools to run/develop pywl inside the VM.
-  environment.systemPackages = with pkgs; [
-    (python3.withPackages (ps: with ps; [ cffi ]))
-    alacritty          # terminal a wlroots compositor can spawn
+  environment.systemPackages = (with pkgs; [
     wayland-utils
     mesa-demos
     vim
     tmux
     htop
-  ];
+  ]) ++ (import ../deps.nix pkgs);
 
   # Useful env so wlroots picks the right backend automatically when run from tty.
   environment.sessionVariables = {
