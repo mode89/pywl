@@ -1,5 +1,9 @@
 { pkgs ? import <nixpkgs> {} }:
 
 pkgs.mkShell {
-  packages = import ./deps.nix pkgs;
+  packages =
+    (import ./deps.nix pkgs) ++
+    (with pkgs; [
+      xdotool
+    ]);
 }

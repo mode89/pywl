@@ -1,0 +1,133 @@
+#!/usr/bin/env python3
+"""Run a command inside a fresh fixed-size Xephyr X server.
+
+Usage: with-xephyr <cmd> [args...]
+
+Starts Xephyr on the first free :N, runs the command with DISPLAY=:N,
+and tears Xephyr down on exit. Forwards the command's exit code.
+"""
+
+from __future__ import annotations
+
+import os
+import shutil
+import signal
+import subprocess
+import sys
+import threading
+import time
+
+
+SCREEN_SIZE = "1280x800"
+
+
+def main(argv: list[str]) -> int:
+    if not argv:
+        sys.exit("usage: with-xephyr <cmd> [args...]")
+    if shutil.which("Xephyr") is None:
+        sys.exit("with-xephyr: Xephyr not found in PATH")
+
+    display = find_free_display()
+    xephyr = start_xephyr(display)
+    try:
+        wait_for_socket(display, xephyr)
+        env = {**os.environ, "DISPLAY": f":{display}"}
+        resize_thread = threading.Thread(
+            target=resize_wlroots_window_once, args=(env,), daemon=True)
+        resize_thread.start()
+        result = subprocess.run(argv, env=env)
+        resize_thread.join(timeout=1)
+        return result.returncode
+    finally:
+        terminate(xephyr)
+
+
+def find_free_display() -> int:
+    for n in range(40, 100):
+        if not os.path.exists(f"/tmp/.X11-unix/X{n}"):
+            return n
+    sys.exit("with-xephyr: no free display in :40-:99")
+
+
+def start_xephyr(display: int) -> subprocess.Popen:
+    return subprocess.Popen(
+        [
+            "Xephyr", f":{display}",
+            "-screen", SCREEN_SIZE,
+            "-ac",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def wait_for_socket(display: int, xephyr: subprocess.Popen) -> None:
+    socket = f"/tmp/.X11-unix/X{display}"
+    deadline = time.monotonic() + 5
+    while not os.path.exists(socket):
+        if xephyr.poll() is not None:
+            sys.exit(f"with-xephyr: Xephyr exited (code {xephyr.returncode})")
+        if time.monotonic() > deadline:
+            sys.exit("with-xephyr: Xephyr did not start within 5s")
+        time.sleep(0.05)
+
+
+def resize_wlroots_window_once(env: dict[str, str]) -> None:
+    if shutil.which("xdotool") is None:
+        sys.stderr.write(
+            "with-xephyr: xdotool not found; wlroots window remains 1024x768\n")
+        return
+
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        wid = wlroots_window(env)
+        if wid is not None:
+            run(["xdotool", "windowmove", wid, "0", "0"], env)
+            ok = run(["xdotool", "windowsize", wid, *SCREEN_SIZE.split("x")], env)
+            sys.stderr.write(
+                f"with-xephyr: resize wlroots window {wid} -> {SCREEN_SIZE} "
+                f"ok={ok}\n")
+            return
+        time.sleep(0.1)
+
+    sys.stderr.write("with-xephyr: timed out waiting for wlroots window\n")
+
+
+def wlroots_window(env: dict[str, str]) -> str | None:
+    # The wlroots X11 child window is unnamed on fresh Xephyr because
+    # wlroots fails to set _NET_WM_NAME before the atom exists. An empty-name
+    # search returns root first and its unnamed child second; use the child.
+    out = output(["xdotool", "search", "--onlyvisible", "--name", ""], env)
+    if not out:
+        return None
+    ids = out.split()
+    return ids[-1] if len(ids) >= 2 else None
+
+
+def run(cmd: list[str], env: dict[str, str]) -> bool:
+    return subprocess.run(
+        cmd, env=env,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    ).returncode == 0
+
+
+def output(cmd: list[str], env: dict[str, str]) -> str | None:
+    try:
+        return subprocess.check_output(
+            cmd, env=env, stderr=subprocess.DEVNULL,
+        ).decode().strip()
+    except subprocess.CalledProcessError:
+        return None
+
+
+def terminate(process: subprocess.Popen) -> None:
+    process.send_signal(signal.SIGTERM)
+    try:
+        process.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
