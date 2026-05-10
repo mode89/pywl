@@ -40,7 +40,7 @@ struct wl_listener {
 };
 struct wl_signal { struct wl_list listener_list; };
 
-/* opaque types */
+// opaque types
 struct wl_display;
 struct wl_event_loop;
 struct wlr_backend;
@@ -69,7 +69,7 @@ struct xkb_keymap;
 struct wlr_keyboard_modifiers;
 struct wlr_keyboard_key_event;
 
-/* libwayland-server */
+// libwayland-server
 void wl_list_remove(struct wl_list *);
 struct wl_display *wl_display_create(void);
 void wl_display_destroy(struct wl_display *);
@@ -79,7 +79,7 @@ void wl_display_terminate(struct wl_display *);
 const char *wl_display_add_socket_auto(struct wl_display *);
 struct wl_event_loop *wl_display_get_event_loop(struct wl_display *);
 
-/* wlroots */
+// wlroots
 struct wlr_backend *wlr_backend_autocreate(
         struct wl_event_loop *, struct wlr_session **);
 bool wlr_backend_start(struct wlr_backend *);
@@ -153,7 +153,7 @@ uint32_t wlr_keyboard_get_modifiers(struct wlr_keyboard *);
 struct wlr_keyboard *wlr_seat_get_keyboard(struct wlr_seat *);
 void wlr_seat_keyboard_clear_focus(struct wlr_seat *);
 
-/* Cursor / pointer (all opaque; fields read via pywl_* accessors) */
+// Cursor / pointer (all opaque; fields read via pywl_* accessors)
 struct wlr_cursor;
 struct wlr_xcursor_manager;
 struct wlr_pointer;
@@ -205,24 +205,24 @@ void wlr_scene_output_send_frame_done(struct wlr_scene_output *,
 
 void wlr_log_init(int verbosity, void *callback);
 
-/* enum wlr_input_device_type */
+// enum wlr_input_device_type
 #define WLR_INPUT_DEVICE_KEYBOARD 0
 #define WLR_INPUT_DEVICE_POINTER 1
 
-/* wl_seat capability bits */
+// wl_seat capability bits
 #define WL_SEAT_CAPABILITY_POINTER 1
 #define WL_SEAT_CAPABILITY_KEYBOARD 2
 
-/* wl_pointer button state */
+// wl_pointer button state
 #define WL_POINTER_BUTTON_STATE_PRESSED 1
 
-/* enum wlr_keyboard_modifier */
+// enum wlr_keyboard_modifier
 #define WLR_MODIFIER_ALT 8
 
-/* linux/input-event-codes.h */
+// linux/input-event-codes.h
 #define BTN_LEFT 0x110
 
-/* our helpers */
+// our helpers
 void pywl_signal_add(struct wl_signal *, struct wl_listener *);
 struct wl_signal *pywl_backend_new_output(struct wlr_backend *);
 struct wl_signal *pywl_output_frame(struct wlr_output *);
@@ -237,22 +237,22 @@ struct wlr_xdg_surface *pywl_toplevel_base(struct wlr_xdg_toplevel *);
 struct wlr_surface *pywl_xdg_surface_surface(struct wlr_xdg_surface *);
 bool pywl_xdg_surface_initial_commit(struct wlr_xdg_surface *);
 struct wlr_scene_tree *pywl_scene_tree(struct wlr_scene *);
-/* wlr_output_state has non-trivial init (pixman region) and an unstable
-   layout we don't want to declare; expose just an alloc/free pair. */
+// wlr_output_state has non-trivial init and unstable layout; expose
+// alloc/free instead of declaring it.
 struct wlr_output_state *pywl_output_state_new(void);
 void pywl_output_state_free(struct wlr_output_state *);
 struct wlr_output_event_request_state;
 
-/* output size accessors */
+// output size accessors
 int pywl_output_width(struct wlr_output *);
 int pywl_output_height(struct wlr_output *);
 
-/* scene_tree's first field is a wlr_scene_node; expose it explicitly. */
+// scene_tree's first field is a wlr_scene_node; expose it explicitly.
 struct wlr_scene_node *pywl_scene_tree_node(struct wlr_scene_tree *);
 
 struct wl_signal *pywl_xdg_toplevel_destroy(struct wlr_xdg_toplevel *);
 
-/* cursor signals + position */
+// cursor signals + position
 struct wl_signal *pywl_cursor_motion(struct wlr_cursor *);
 struct wl_signal *pywl_cursor_motion_absolute(struct wlr_cursor *);
 struct wl_signal *pywl_cursor_button(struct wlr_cursor *);
@@ -261,8 +261,8 @@ struct wl_signal *pywl_cursor_frame(struct wlr_cursor *);
 double pywl_cursor_x(struct wlr_cursor *);
 double pywl_cursor_y(struct wlr_cursor *);
 
-/* scene_node position + opaque user-data, used to recover the toplevel
-   that owns a hit-tested node. */
+// scene_node position + opaque user-data; used to recover the toplevel
+// owning a hit-tested node.
 int pywl_scene_node_x(struct wlr_scene_node *);
 int pywl_scene_node_y(struct wlr_scene_node *);
 int pywl_scene_node_type(struct wlr_scene_node *);
@@ -271,7 +271,7 @@ void *pywl_scene_node_data(struct wlr_scene_node *);
 void pywl_scene_tree_set_data(struct wlr_scene_tree *, void *);
 struct wlr_surface *pywl_scene_surface_surface(struct wlr_scene_surface *);
 
-/* hit-test entry point (real wlroots export, declared near accessors) */
+// hit-test entry point (real wlroots export, declared near accessors)
 struct wlr_scene_buffer;
 struct wlr_scene_surface;
 struct wlr_scene_node *wlr_scene_node_at(struct wlr_scene_node *root,
@@ -280,10 +280,10 @@ struct wlr_scene_buffer *wlr_scene_buffer_from_node(struct wlr_scene_node *);
 struct wlr_scene_surface *wlr_scene_surface_try_from_buffer(
         struct wlr_scene_buffer *);
 
-/* enum wlr_scene_node_type */
+// enum wlr_scene_node_type
 #define WLR_SCENE_NODE_BUFFER 2
 
-/* keyboard input field accessors (struct layout we don't want to declare) */
+// keyboard input field accessors (struct layout we don't want to declare)
 struct wl_signal *pywl_backend_new_input(struct wlr_backend *);
 struct wl_signal *pywl_surface_map(struct wlr_surface *);
 struct wl_signal *pywl_keyboard_key_signal(struct wlr_keyboard *);
@@ -294,7 +294,7 @@ struct wlr_keyboard_modifiers *pywl_keyboard_modifiers_ptr(
 uint32_t *pywl_keyboard_keycodes(struct wlr_keyboard *);
 size_t pywl_keyboard_num_keycodes(struct wlr_keyboard *);
 
-/* event field accessors (kept opaque to avoid depending on layout) */
+// event field accessors (kept opaque to avoid depending on layout)
 uint32_t pywl_key_event_time_msec(struct wlr_keyboard_key_event *);
 uint32_t pywl_key_event_keycode(struct wlr_keyboard_key_event *);
 uint32_t pywl_key_event_state(struct wlr_keyboard_key_event *);
@@ -584,11 +584,8 @@ ffi, lib = _build()
 
 
 # --- Listener plumbing -------------------------------------------------------
-#
-# wlroots delivers events via `struct wl_listener` whose `notify` field is a
-# C function pointer. We allocate one wl_listener per Python callback, register
-# them on signals, and route all of them through a single dispatch trampoline
-# that looks up the Python callable by listener address.
+# One wl_listener per Python callback, all routed through a single C
+# trampoline that looks up the callable by listener address.
 
 # ptr_int -> (listener_keepalive, callable)
 _listeners: dict[int, tuple[object, object]] = {}

@@ -52,9 +52,8 @@ def main(startup_cmd: str = "alacritty") -> int:
     # First (and assumed only) output, populated on the new_output event.
     primary_output = [ffi.NULL]
 
-    # toplevels: maps an integer key (stored as scene_tree.node.data) to
-    # (xdg_toplevel, scene_tree). Used to recover the toplevel that owns
-    # a hit-tested scene node.
+    # Maps scene_tree.node.data key -> (xdg_toplevel, scene_tree); used
+    # to recover the toplevel owning a hit-tested scene node.
     toplevels: dict = {}
     next_key = [1]
 
@@ -91,17 +90,14 @@ def main(startup_cmd: str = "alacritty") -> int:
         scene_output = lib.wlr_scene_output_create(scene, wlr_output)
         lib.wlr_scene_output_layout_add_output(
             scene_layout, layout_output, scene_output)
-        # Nested backends (Wayland/X11) ask for resize/scale via
-        # request_state; commit it so output geometry stays in sync with
-        # the buffers the parent compositor expects.
+        # Nested backends (Wayland/X11) request resize/scale via
+        # request_state; commit it to keep output and swapchain in sync.
         def on_request_state(data):
             lib.wlr_output_commit_state(
                 wlr_output, lib.pywl_output_event_request_state(data))
 
-        # Track listener keys so we can detach them when the output is
-        # destroyed (e.g. parent compositor closes the nested window).
-        # Otherwise the freed wl_signal still references our listeners and
-        # the next dispatch is a use-after-free.
+        # Detach on output destroy; the freed wl_signal would otherwise
+        # still reference our listeners (use-after-free on next dispatch).
         out_keys = [
             add_listener(
                 lib.pywl_output_frame(wlr_output), on_frame_for(wlr_output)),
@@ -337,10 +333,8 @@ def main(startup_cmd: str = "alacritty") -> int:
 
         surface = lib.pywl_xdg_surface_surface(base)
 
-        # Listeners attached to this toplevel's surface signals must be
-        # removed before wlroots frees the surface, otherwise libwayland
-        # aborts on the dangling listener_list. Track them and tear them
-        # down on the toplevel's destroy event.
+        # Detach surface listeners on toplevel destroy; libwayland aborts
+        # on dangling listeners after wlroots frees the surface.
         keys = [
             add_listener(lib.pywl_surface_commit(surface),
                          commit_handler_for(xdg_toplevel, scene_tree)),
