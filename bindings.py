@@ -76,6 +76,8 @@ void wl_display_destroy(struct wl_display *);
 void wl_display_destroy_clients(struct wl_display *);
 void wl_display_run(struct wl_display *);
 void wl_display_terminate(struct wl_display *);
+void wl_display_flush_clients(struct wl_display *);
+int wl_event_loop_dispatch(struct wl_event_loop *, int timeout);
 const char *wl_display_add_socket_auto(struct wl_display *);
 struct wl_event_loop *wl_display_get_event_loop(struct wl_display *);
 

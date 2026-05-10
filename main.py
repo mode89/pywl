@@ -373,14 +373,17 @@ def main(startup_cmd: str = "alacritty") -> int:
     if startup_cmd:
         subprocess.Popen(startup_cmd, shell=True)
 
-    # SIGINT/SIGTERM interrupt epoll_wait (EINTR), making wl_display_run
-    # return; wl_display_terminate ensures it stays out.
+    # 10Hz loop so signals are serviced between iterations; the handler
+    # only flags (raising mid-cffi-callback would leak listeners).
+    stop = False
     def _stop(_sig, _frm):
-        lib.wl_display_terminate(display)
+        nonlocal stop
+        stop = True
     signal.signal(signal.SIGINT, _stop)
     signal.signal(signal.SIGTERM, _stop)
-
-    lib.wl_display_run(display)
+    while not stop:
+        lib.wl_display_flush_clients(display)
+        lib.wl_event_loop_dispatch(loop, 100)
 
     lib.wl_display_destroy_clients(display)
     for k in cursor_keys + server_keys:
