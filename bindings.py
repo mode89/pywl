@@ -92,6 +92,7 @@ void wlr_renderer_destroy(struct wlr_renderer *);
 struct wlr_allocator *wlr_allocator_autocreate(
         struct wlr_backend *, struct wlr_renderer *);
 void wlr_allocator_destroy(struct wlr_allocator *);
+void wlr_scene_node_destroy(struct wlr_scene_node *);
 
 struct wlr_compositor *wlr_compositor_create(
         struct wl_display *, uint32_t version, struct wlr_renderer *);
@@ -225,6 +226,11 @@ void wlr_log_init(int verbosity, void *callback);
 void pywl_signal_add(struct wl_signal *, struct wl_listener *);
 struct wl_signal *pywl_backend_new_output(struct wlr_backend *);
 struct wl_signal *pywl_output_frame(struct wlr_output *);
+struct wl_signal *pywl_output_request_state(struct wlr_output *);
+struct wl_signal *pywl_output_destroy_signal(struct wlr_output *);
+struct wl_signal *pywl_input_device_destroy_signal(struct wlr_input_device *);
+const struct wlr_output_state *pywl_output_event_request_state(
+        struct wlr_output_event_request_state *);
 struct wl_signal *pywl_xdg_shell_new_toplevel(struct wlr_xdg_shell *);
 struct wl_signal *pywl_surface_commit(struct wlr_surface *);
 struct wlr_xdg_surface *pywl_toplevel_base(struct wlr_xdg_toplevel *);
@@ -235,6 +241,7 @@ struct wlr_scene_tree *pywl_scene_tree(struct wlr_scene *);
    layout we don't want to declare; expose just an alloc/free pair. */
 struct wlr_output_state *pywl_output_state_new(void);
 void pywl_output_state_free(struct wlr_output_state *);
+struct wlr_output_event_request_state;
 
 /* output size accessors */
 int pywl_output_width(struct wlr_output *);
@@ -350,6 +357,19 @@ struct wl_signal *pywl_backend_new_output(struct wlr_backend *b) {
 }
 struct wl_signal *pywl_output_frame(struct wlr_output *o) {
     return &o->events.frame;
+}
+struct wl_signal *pywl_output_request_state(struct wlr_output *o) {
+    return &o->events.request_state;
+}
+struct wl_signal *pywl_output_destroy_signal(struct wlr_output *o) {
+    return &o->events.destroy;
+}
+struct wl_signal *pywl_input_device_destroy_signal(struct wlr_input_device *d) {
+    return &d->events.destroy;
+}
+const struct wlr_output_state *pywl_output_event_request_state(
+        struct wlr_output_event_request_state *e) {
+    return e->state;
 }
 struct wl_signal *pywl_xdg_shell_new_toplevel(struct wlr_xdg_shell *s) {
     return &s->events.new_toplevel;

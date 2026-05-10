@@ -90,8 +90,33 @@ def main(startup_cmd: str = "alacritty") -> int:
         scene_output = lib.wlr_scene_output_create(scene, wlr_output)
         lib.wlr_scene_output_layout_add_output(
             scene_layout, layout_output, scene_output)
-        add_listener(
-            lib.pywl_output_frame(wlr_output), on_frame_for(wlr_output))
+        # Nested backends (Wayland/X11) ask for resize/scale via
+        # request_state; commit it so output geometry stays in sync with
+        # the buffers the parent compositor expects.
+        def on_request_state(data):
+            lib.wlr_output_commit_state(
+                wlr_output, lib.pywl_output_event_request_state(data))
+
+        # Track listener keys so we can detach them when the output is
+        # destroyed (e.g. parent compositor closes the nested window).
+        # Otherwise the freed wl_signal still references our listeners and
+        # the next dispatch is a use-after-free.
+        out_keys = [
+            add_listener(
+                lib.pywl_output_frame(wlr_output), on_frame_for(wlr_output)),
+            add_listener(
+                lib.pywl_output_request_state(wlr_output), on_request_state),
+        ]
+
+        def on_output_destroy(_data):
+            for k in out_keys:
+                remove_listener(k)
+            remove_listener(out_destroy_key)
+            if primary_output[0] == wlr_output:
+                primary_output[0] = ffi.NULL
+
+        out_destroy_key = add_listener(
+            lib.pywl_output_destroy_signal(wlr_output), on_output_destroy)
 
     add_listener(lib.pywl_backend_new_output(backend), on_new_output)
 
@@ -124,8 +149,18 @@ def main(startup_cmd: str = "alacritty") -> int:
                 lib.pywl_key_event_state(ev),
             )
 
-        add_listener(lib.pywl_keyboard_modifiers_signal(kb), on_modifiers)
-        add_listener(lib.pywl_keyboard_key_signal(kb), on_key)
+        kb_keys = [
+            add_listener(lib.pywl_keyboard_modifiers_signal(kb), on_modifiers),
+            add_listener(lib.pywl_keyboard_key_signal(kb), on_key),
+        ]
+
+        def on_kb_destroy(_data):
+            for k in kb_keys:
+                remove_listener(k)
+            remove_listener(kb_destroy_key)
+
+        kb_destroy_key = add_listener(
+            lib.pywl_input_device_destroy_signal(device), on_kb_destroy)
         lib.wlr_seat_set_keyboard(seat, kb)
         has_keyboard[0] = True
 
@@ -341,6 +376,12 @@ def main(startup_cmd: str = "alacritty") -> int:
     lib.wl_display_run(display)
 
     lib.wl_display_destroy_clients(display)
+    lib.wlr_scene_node_destroy(
+        lib.pywl_scene_tree_node(lib.pywl_scene_tree(scene)))
+    lib.wlr_xcursor_manager_destroy(xcursor_mgr)
+    lib.wlr_cursor_destroy(cursor)
+    lib.wlr_allocator_destroy(allocator)
+    lib.wlr_renderer_destroy(renderer)
     lib.wl_display_destroy(display)
     return 0
 
