@@ -7,6 +7,7 @@ and exec alacritty. No input handling, no window management.
 from __future__ import annotations
 
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -118,7 +119,9 @@ def main(startup_cmd: str = "alacritty") -> int:
         out_destroy_key = add_listener(
             lib.pywl_output_destroy_signal(wlr_output), on_output_destroy)
 
-    add_listener(lib.pywl_backend_new_output(backend), on_new_output)
+    server_keys = []
+    server_keys.append(
+        add_listener(lib.pywl_backend_new_output(backend), on_new_output))
 
     # --- Input handling -----------------------------------------------------
     seat = lib.wlr_seat_create(display, b"seat0")
@@ -176,7 +179,8 @@ def main(startup_cmd: str = "alacritty") -> int:
             caps |= lib.WL_SEAT_CAPABILITY_KEYBOARD
         lib.wlr_seat_set_capabilities(seat, caps)
 
-    add_listener(lib.pywl_backend_new_input(backend), on_new_input)
+    server_keys.append(
+        add_listener(lib.pywl_backend_new_input(backend), on_new_input))
 
     def focus_surface(surface):
         # NULL keycodes/modifiers means "no keys held, no modifiers active"
@@ -288,12 +292,14 @@ def main(startup_cmd: str = "alacritty") -> int:
     def on_cursor_frame(_data):
         lib.wlr_seat_pointer_notify_frame(seat)
 
-    add_listener(lib.pywl_cursor_motion(cursor), on_cursor_motion)
-    add_listener(
-        lib.pywl_cursor_motion_absolute(cursor), on_cursor_motion_absolute)
-    add_listener(lib.pywl_cursor_button(cursor), on_cursor_button)
-    add_listener(lib.pywl_cursor_axis(cursor), on_cursor_axis)
-    add_listener(lib.pywl_cursor_frame(cursor), on_cursor_frame)
+    cursor_keys = [
+        add_listener(lib.pywl_cursor_motion(cursor), on_cursor_motion),
+        add_listener(
+            lib.pywl_cursor_motion_absolute(cursor), on_cursor_motion_absolute),
+        add_listener(lib.pywl_cursor_button(cursor), on_cursor_button),
+        add_listener(lib.pywl_cursor_axis(cursor), on_cursor_axis),
+        add_listener(lib.pywl_cursor_frame(cursor), on_cursor_frame),
+    ]
 
     # --- xdg-shell handling -------------------------------------------------
     def commit_handler_for(xdg_toplevel, scene_tree):
@@ -353,8 +359,8 @@ def main(startup_cmd: str = "alacritty") -> int:
         destroy_key = add_listener(
             lib.pywl_xdg_toplevel_destroy(xdg_toplevel), on_destroy)
 
-    add_listener(
-        lib.pywl_xdg_shell_new_toplevel(xdg_shell), on_new_xdg_toplevel)
+    server_keys.append(add_listener(
+        lib.pywl_xdg_shell_new_toplevel(xdg_shell), on_new_xdg_toplevel))
 
     socket = lib.wl_display_add_socket_auto(display)
     if socket == ffi.NULL:
@@ -373,9 +379,18 @@ def main(startup_cmd: str = "alacritty") -> int:
     if startup_cmd:
         subprocess.Popen(startup_cmd, shell=True)
 
+    # SIGINT/SIGTERM interrupt epoll_wait (EINTR), making wl_display_run
+    # return; wl_display_terminate ensures it stays out.
+    def _stop(_sig, _frm):
+        lib.wl_display_terminate(display)
+    signal.signal(signal.SIGINT, _stop)
+    signal.signal(signal.SIGTERM, _stop)
+
     lib.wl_display_run(display)
 
     lib.wl_display_destroy_clients(display)
+    for k in cursor_keys + server_keys:
+        remove_listener(k)
     lib.wlr_scene_node_destroy(
         lib.pywl_scene_tree_node(lib.pywl_scene_tree(scene)))
     lib.wlr_xcursor_manager_destroy(xcursor_mgr)
