@@ -208,21 +208,21 @@ void wlr_scene_output_send_frame_done(struct wlr_scene_output *,
 void wlr_log_init(int verbosity, void *callback);
 
 // enum wlr_input_device_type
-#define WLR_INPUT_DEVICE_KEYBOARD 0
-#define WLR_INPUT_DEVICE_POINTER 1
+#define WLR_INPUT_DEVICE_KEYBOARD ...
+#define WLR_INPUT_DEVICE_POINTER ...
 
 // wl_seat capability bits
-#define WL_SEAT_CAPABILITY_POINTER 1
-#define WL_SEAT_CAPABILITY_KEYBOARD 2
+#define WL_SEAT_CAPABILITY_POINTER ...
+#define WL_SEAT_CAPABILITY_KEYBOARD ...
 
 // wl_pointer button state
-#define WL_POINTER_BUTTON_STATE_PRESSED 1
+#define WL_POINTER_BUTTON_STATE_PRESSED ...
 
 // enum wlr_keyboard_modifier
-#define WLR_MODIFIER_ALT 8
+#define WLR_MODIFIER_ALT ...
 
 // linux/input-event-codes.h
-#define BTN_LEFT 0x110
+#define BTN_LEFT ...
 
 // our helpers
 void pywl_signal_add(struct wl_signal *, struct wl_listener *);
@@ -283,7 +283,7 @@ struct wlr_scene_surface *wlr_scene_surface_try_from_buffer(
         struct wlr_scene_buffer *);
 
 // enum wlr_scene_node_type
-#define WLR_SCENE_NODE_BUFFER 2
+#define WLR_SCENE_NODE_BUFFER ...
 
 // keyboard input field accessors (struct layout we don't want to declare)
 struct wl_signal *pywl_backend_new_input(struct wlr_backend *);
