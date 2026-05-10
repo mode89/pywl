@@ -12,7 +12,7 @@ import subprocess
 import sys
 import time
 
-from bindings import ffi, lib, add_listener, remove_listener
+from bindings import ffi, lib, add_listener, remove_listener, _listeners
 
 
 WLR_DEBUG = 3  # enum wlr_log_importance
@@ -395,6 +395,9 @@ def main(startup_cmd: str = "alacritty") -> int:
     lib.wlr_allocator_destroy(allocator)
     lib.wlr_renderer_destroy(renderer)
     lib.wl_display_destroy(display)
+
+    print(f"listeners remaining: {len(_listeners)}", file=sys.stderr)
+
     return 0
 
 

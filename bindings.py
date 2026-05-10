@@ -572,6 +572,7 @@ def _build():
         library_dirs=library_dirs,
         extra_compile_args=extra_cflags + ["-w"],
     )
+    print(f"Compiling bindings in {build_dir} ...")
     so_path = builder.compile(tmpdir=build_dir)
 
     spec = importlib.util.spec_from_file_location(_MODULE, so_path)
