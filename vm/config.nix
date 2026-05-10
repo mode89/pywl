@@ -11,6 +11,11 @@
     forwardPorts = [
       { from = "host"; host.port = 2222; guest.port = 22; }
     ];
+    # Hardware-accelerated virtio-gpu via virgl (host GPU passthrough for rendering).
+    qemu.options = [
+      "-device virtio-vga-gl"
+      "-display gtk,gl=on,show-cursor=on"
+    ];
     # Mount the project read-write into the guest at /mnt/pywl.
     sharedDirectories.pywl = {
       source = toString ./..;
