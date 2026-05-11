@@ -32,6 +32,7 @@ in {
     isNormalUser = true;
     extraGroups = [ "wheel" "video" "input" ];
     password = "dev";
+    openssh.authorizedKeys.keyFiles = [ ./id_ed25519.pub ];
   };
   users.users.root.password = "root";
 

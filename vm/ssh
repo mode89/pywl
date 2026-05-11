@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 
+SCRIPT_DIR=$(dirname "$(readlink -f "$0")")
+
 ssh -o "UserKnownHostsFile=/dev/null" \
     -o "StrictHostKeyChecking=no" \
+    -o "IdentitiesOnly=yes" \
+    -i "$SCRIPT_DIR/id_ed25519" \
     -p 2222 \
     dev@localhost "$@"
