@@ -390,12 +390,8 @@ def handle_keybinding(server: Server, mods: int, sym: int) -> bool:
 def cycle_focus(server: Server) -> None:
     if len(server.windows) < 2:
         return
-    current = server.keyboard_focus
-    if current in server.windows:
-        i = server.windows.index(current)
-        nxt = server.windows[(i + 1) % len(server.windows)]
-    else:
-        nxt = server.windows[0]
+    # server.windows is MRU-sorted (focus_window appends), so [0] is LRU.
+    nxt = server.windows[0]
     raise_window(server, nxt)
     focus_window(server, nxt, nxt.surface)
 
@@ -585,8 +581,6 @@ def on_window_new(server: Server, data) -> Window:
         server.primary_output, Rect(0, 0, 0, 0),
     )
     window.handle = ffi.new_handle(window)
-    server.windows.append(window)
-
     scene_tree.node.data = window.handle
     # Used by popups to find their parent's scene tree.
     base.data = ffi.cast("void *", scene_tree)
@@ -599,6 +593,9 @@ def on_window_new(server: Server, data) -> Window:
             lib.pywl_surface_map(surface),
             lambda data: on_window_map(server, window, data)),
         listen(
+            lib.pywl_surface_unmap(surface),
+            lambda data: on_window_unmap(server, window, data)),
+        listen(
             lib.pywl_xdg_toplevel_destroy(xdg_toplevel),
             lambda data: on_window_destroy(server, window, data)),
     ]
@@ -610,10 +607,26 @@ def on_window_destroy(server: Server, window: Window, _data) -> None:
     """Called when an app closes one of its windows."""
     for listener in window.listeners:
         listener.remove()
+    # In case the window is destroyed without an unmap firing first.
+    detach_window(server, window)
+
+
+def on_window_unmap(server: Server, window: Window, _data) -> None:
+    """Called when a window becomes hidden (but not destroyed)."""
+    detach_window(server, window)
+
+
+def detach_window(server: Server, window: Window) -> None:
+    was_focused = server.keyboard_focus is window
     if window in server.windows:
         server.windows.remove(window)
-    if server.keyboard_focus is window:
-        server.keyboard_focus = None
+    if was_focused:
+        if server.windows:
+            successor = server.windows[-1]  # most-recently-focused survivor
+            raise_window(server, successor)
+            focus_window(server, successor, successor.surface)
+        else:
+            clear_keyboard_focus(server)
     if server.move_grab is not None and server.move_grab.window is window:
         server.move_grab = None
     if server.resize_grab is not None and server.resize_grab.window is window:
@@ -647,6 +660,7 @@ def on_window_commit(server: Server, window: Window, _data) -> None:
 
 def on_window_map(server: Server, window: Window, _data) -> None:
     """Called the moment a window first has pixels to show on screen."""
+    server.windows.append(window)
     focus_window(server, window, window.surface)
 
 
@@ -701,6 +715,11 @@ def focus_surface(server: Server, surface) -> None:
 
 
 def focus_window(server: Server, window: Window, surface) -> None:
+    # Move to end of server.windows so it's the MRU; detach_window and
+    # cycle_focus rely on this ordering.
+    if server.windows and server.windows[-1] is not window:
+        server.windows.remove(window)
+        server.windows.append(window)
     focus_surface(server, surface)
     for w in server.windows:
         lib.wlr_xdg_toplevel_set_activated(w.xdg_toplevel, w is window)

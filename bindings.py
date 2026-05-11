@@ -320,6 +320,7 @@ void pywl_output_state_free(struct wlr_output_state *);
 struct wl_signal *pywl_xdg_toplevel_destroy(struct wlr_xdg_toplevel *);
 struct wl_signal *pywl_xdg_shell_new_popup(struct wlr_xdg_shell *);
 struct wl_signal *pywl_xdg_popup_destroy(struct wlr_xdg_popup *);
+struct wl_signal *pywl_surface_unmap(struct wlr_surface *);
 struct wl_signal *pywl_seat_request_set_selection(struct wlr_seat *);
 
 struct wlr_output_event_request_state {
@@ -444,6 +445,9 @@ struct wl_signal *pywl_xdg_shell_new_popup(struct wlr_xdg_shell *s) {
 }
 struct wl_signal *pywl_xdg_popup_destroy(struct wlr_xdg_popup *p) {
     return &p->events.destroy;
+}
+struct wl_signal *pywl_surface_unmap(struct wlr_surface *s) {
+    return &s->events.unmap;
 }
 struct wl_signal *pywl_seat_request_set_selection(struct wlr_seat *s) {
     return &s->events.request_set_selection;
