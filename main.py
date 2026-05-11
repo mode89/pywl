@@ -209,6 +209,7 @@ def destroy_server(server: Server) -> None:
     destroy_cursor(server.cursor)
     lib.wlr_allocator_destroy(server.allocator)
     lib.wlr_renderer_destroy(server.renderer)
+    lib.wlr_backend_destroy(server.backend)
     lib.wl_display_destroy(server.display)
 
 
