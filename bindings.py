@@ -89,9 +89,15 @@ struct wlr_scene_surface { struct wlr_surface *surface; ...; };
 struct wlr_xdg_surface {
     struct wlr_surface *surface;
     bool initial_commit;
+    void *data;
     ...;
 };
 struct wlr_xdg_toplevel { struct wlr_xdg_surface *base; ...; };
+struct wlr_xdg_popup {
+    struct wlr_xdg_surface *base;
+    struct wlr_surface *parent;
+    ...;
+};
 struct wlr_keyboard_key_event {
     uint32_t time_msec;
     uint32_t keycode;
@@ -165,6 +171,8 @@ struct wlr_xdg_shell *wlr_xdg_shell_create(
 void wlr_xdg_toplevel_set_size(struct wlr_xdg_toplevel *, int32_t, int32_t);
 uint32_t wlr_xdg_toplevel_set_activated(struct wlr_xdg_toplevel *, bool activated);
 void wlr_xdg_toplevel_send_close(struct wlr_xdg_toplevel *);
+struct wlr_xdg_surface *wlr_xdg_surface_try_from_wlr_surface(struct wlr_surface *);
+void wlr_xdg_surface_schedule_configure(struct wlr_xdg_surface *);
 
 struct wlr_seat *wlr_seat_create(struct wl_display *, const char *);
 void wlr_seat_set_capabilities(struct wlr_seat *, uint32_t caps);
@@ -302,6 +310,8 @@ struct wlr_output_state *pywl_output_state_new(void);
 void pywl_output_state_free(struct wlr_output_state *);
 
 struct wl_signal *pywl_xdg_toplevel_destroy(struct wlr_xdg_toplevel *);
+struct wl_signal *pywl_xdg_shell_new_popup(struct wlr_xdg_shell *);
+struct wl_signal *pywl_xdg_popup_destroy(struct wlr_xdg_popup *);
 
 struct wlr_output_event_request_state {
     const struct wlr_output_state *state;
@@ -419,6 +429,12 @@ struct wl_signal *pywl_keyboard_modifiers_signal(struct wlr_keyboard *k) {
 }
 struct wl_signal *pywl_xdg_toplevel_destroy(struct wlr_xdg_toplevel *t) {
     return &t->events.destroy;
+}
+struct wl_signal *pywl_xdg_shell_new_popup(struct wlr_xdg_shell *s) {
+    return &s->events.new_popup;
+}
+struct wl_signal *pywl_xdg_popup_destroy(struct wlr_xdg_popup *p) {
+    return &p->events.destroy;
 }
 
 struct wl_signal *pywl_cursor_motion(struct wlr_cursor *c) {

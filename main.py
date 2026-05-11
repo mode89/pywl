@@ -54,6 +54,12 @@ class Keyboard:
 
 
 @dataclass
+class Popup:
+    xdg_popup: object
+    listeners: list[object] = field(default_factory=list)
+
+
+@dataclass
 class Cursor:
     wlr_cursor: object
     xcursor_mgr: object
@@ -91,6 +97,7 @@ class Server:
     outputs: list[Output]
     windows: list[Window]
     keyboards: list[Keyboard]
+    popups: list[Popup]
     listeners: list[object]
     cursor: Cursor | None = None
     keyboard_focus: Window | None = None
@@ -123,6 +130,9 @@ def main(startup_cmd: str | None = None) -> int:
         listen(
             lib.pywl_xdg_shell_new_toplevel(server.xdg_shell),
             lambda data: on_window_new(server, data)),
+        listen(
+            lib.pywl_xdg_shell_new_popup(server.xdg_shell),
+            lambda data: on_popup_new(server, data)),
     ]
 
     server.cursor = create_cursor(server)
@@ -186,6 +196,7 @@ def create_server() -> Server | None:
         outputs=[],
         windows=[],
         keyboards=[],
+        popups=[],
         listeners=[],
     )
 
@@ -574,6 +585,8 @@ def on_window_new(server: Server, data) -> Window:
     server.windows.append(window)
 
     scene_tree.node.data = window.handle
+    # Used by popups to find their parent's scene tree.
+    base.data = ffi.cast("void *", scene_tree)
 
     window.listeners = [
         listen(
@@ -632,6 +645,41 @@ def on_window_commit(server: Server, window: Window, _data) -> None:
 def on_window_map(server: Server, window: Window, _data) -> None:
     """Called the moment a window first has pixels to show on screen."""
     focus_window(server, window, window.surface)
+
+
+def on_popup_new(server: Server, data) -> None:
+    xdg_popup = ffi.cast("struct wlr_xdg_popup *", data)
+    parent_xdg = lib.wlr_xdg_surface_try_from_wlr_surface(xdg_popup.parent)
+    if parent_xdg == ffi.NULL or parent_xdg.data == ffi.NULL:
+        return  # parent isn't an xdg_surface we track; skip
+    parent_tree = ffi.cast("struct wlr_scene_tree *", parent_xdg.data)
+    popup_tree = lib.wlr_scene_xdg_surface_create(parent_tree, xdg_popup.base)
+    xdg_popup.base.data = ffi.cast("void *", popup_tree)
+
+    popup = Popup(xdg_popup)
+    server.popups.append(popup)
+
+    surface = xdg_popup.base.surface
+    popup.listeners = [
+        listen(
+            lib.pywl_surface_commit(surface),
+            lambda data: on_popup_commit(server, popup, data)),
+        listen(
+            lib.pywl_xdg_popup_destroy(xdg_popup),
+            lambda data: on_popup_destroy(server, popup, data)),
+    ]
+
+
+def on_popup_commit(server: Server, popup: Popup, _data) -> None:
+    if popup.xdg_popup.base.initial_commit:
+        lib.wlr_xdg_surface_schedule_configure(popup.xdg_popup.base)
+
+
+def on_popup_destroy(server: Server, popup: Popup, _data) -> None:
+    for listener in popup.listeners:
+        listener.remove()
+    if popup in server.popups:
+        server.popups.remove(popup)
 
 
 def current_output_ptr(server: Server):
