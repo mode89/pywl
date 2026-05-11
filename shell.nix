@@ -4,6 +4,6 @@ pkgs.mkShell {
   packages =
     (import ./deps.nix pkgs) ++
     (with pkgs; [
-      xdotool
+      xpra
     ]);
 }

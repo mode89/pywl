@@ -1,0 +1,131 @@
+#!/usr/bin/env python3
+"""Run a command inside a fresh xpra X server with a viewer attached.
+
+Usage: with-xpra <cmd> [args...]
+
+Starts an xpra server on the first free :N, attaches a viewer, runs the
+command with DISPLAY=:N, and tears everything down on exit. Forwards the
+command's exit code.
+
+Unlike with-xephyr, the viewer window is reparented into the host WM, so
+resizing it propagates through xpra to the virtual X server and the
+wlroots X11 backend sees output mode changes.
+"""
+
+from __future__ import annotations
+
+import os
+import shutil
+import signal
+import subprocess
+import sys
+import time
+from contextlib import contextmanager
+
+
+def main(argv: list[str]) -> int:
+    if not argv:
+        sys.exit("usage: with-xpra <cmd> [args...]")
+    for tool in ("xpra",):
+        if shutil.which(tool) is None:
+            sys.exit(f"with-xpra: {tool} not found in PATH")
+
+    display = find_free_display()
+    with xpra_server(display), xpra_viewer(display):
+        env = {**os.environ, "DISPLAY": f":{display}"}
+        return subprocess.run(argv, env=env).returncode
+
+
+@contextmanager
+def xpra_server(display: int):
+    server = subprocess.Popen(
+        [
+            "xpra", "start", f":{display}",
+            "--daemon=no",
+            "--no-mdns",
+            "--no-pulseaudio",
+            "--speaker=no",
+            "--microphone=no",
+            "--no-notifications",
+            "--no-printing",
+            "--no-systemd-run",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        wait_for_socket(display, server)
+        # xpra needs extra time to fully wire up XInput2 after startup; without
+        # this delay the wlroots X11 backend sometimes never receives pointer
+        # events.
+        time.sleep(3.0)
+        yield server
+    finally:
+        terminate(server)
+
+
+@contextmanager
+def xpra_viewer(display: int):
+    viewer = subprocess.Popen(
+        [
+            "xpra", "attach", f":{display}",
+            "--headerbar=no",
+            "--tray=no",
+            "--system-tray=no",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        wait_for_viewer(display, viewer)
+        yield viewer
+    finally:
+        terminate(viewer)
+
+
+def find_free_display() -> int:
+    for n in range(40, 100):
+        if not os.path.exists(f"/tmp/.X11-unix/X{n}"):
+            return n
+    sys.exit("with-xpra: no free display in :40-:99")
+
+
+def wait_for_socket(display: int, server: subprocess.Popen) -> None:
+    socket = f"/tmp/.X11-unix/X{display}"
+    deadline = time.monotonic() + 15
+    while not os.path.exists(socket):
+        if server.poll() is not None:
+            sys.exit(f"with-xpra: server exited (code {server.returncode})")
+        if time.monotonic() > deadline:
+            sys.exit("with-xpra: server did not start within 15s")
+        time.sleep(0.1)
+
+
+def wait_for_viewer(display: int, viewer: subprocess.Popen) -> None:
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        if viewer.poll() is not None:
+            sys.exit(f"with-xpra: viewer exited (code {viewer.returncode})")
+        info = subprocess.run(
+            ["xpra", "info", f":{display}"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            timeout=5,
+        ).stdout.decode(errors="replace")
+        if "clients=1" in info:
+            return
+        time.sleep(0.1)
+    sys.exit("with-xpra: viewer did not attach within 15s")
+
+
+def terminate(process: subprocess.Popen) -> None:
+    if process.poll() is None:
+        process.send_signal(signal.SIGTERM)
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
