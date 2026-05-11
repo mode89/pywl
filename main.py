@@ -20,20 +20,33 @@ WLR_DEBUG = 3  # enum wlr_log_importance
 
 
 @dataclass
-class Rect:
-    x: int
-    y: int
-    width: int
-    height: int
-
-
-@dataclass
 class Output:
     wlr_output: object
     width: int
     height: int
     enabled: bool = True
     listeners: list[object] = field(default_factory=list)
+
+
+@dataclass
+class Keyboard:
+    wlr_keyboard: object
+    listeners: list[object] = field(default_factory=list)
+
+
+@dataclass
+class Cursor:
+    wlr_cursor: object
+    xcursor_mgr: object
+    listeners: list[object]
+
+
+@dataclass
+class Rect:
+    x: int
+    y: int
+    width: int
+    height: int
 
 
 @dataclass
@@ -48,22 +61,9 @@ class Window:
 
 
 @dataclass
-class Keyboard:
-    wlr_keyboard: object
-    listeners: list[object] = field(default_factory=list)
-
-
-@dataclass
 class Popup:
     xdg_popup: object
     listeners: list[object] = field(default_factory=list)
-
-
-@dataclass
-class Cursor:
-    wlr_cursor: object
-    xcursor_mgr: object
-    listeners: list[object]
 
 
 @dataclass
