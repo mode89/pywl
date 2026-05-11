@@ -87,12 +87,14 @@ class Server:
     keyboard_focus: Window | None = None
     move_grab: MoveGrab | None = None
     primary_output: Output | None = None
+    terminal_cmd: str = "xterm"
 
 
-def main(startup_cmd: str = "alacritty") -> int:
+def main(startup_cmd: str | None = None) -> int:
     server = create_server()
     if server is None:
         return 1
+    server.terminal_cmd = os.environ.get("TERMINAL", "xterm")
 
     socket = lib.wl_display_add_socket_auto(server.display)
     if socket == ffi.NULL:
@@ -316,9 +318,23 @@ def on_keyboard_modifiers(server: Server, keyboard: Keyboard, _data) -> None:
         server.seat, ffi.addressof(keyboard.wlr_keyboard.modifiers))
 
 
+def keysym(name: str) -> int:
+    """Resolve an xkb key name (e.g. "Return") to a keysym."""
+    sym = lib.xkb_keysym_from_name(name.encode(), 0)
+    if sym == 0:
+        raise ValueError(f"unknown key name: {name!r}")
+    return sym
+
+
 def on_keyboard_key(server: Server, keyboard: Keyboard, data) -> None:
     ev = ffi.cast("struct wlr_keyboard_key_event *", data)
     lib.wlr_seat_set_keyboard(server.seat, keyboard.wlr_keyboard)
+    if ev.state == lib.WL_KEYBOARD_KEY_STATE_PRESSED:
+        mods = lib.wlr_keyboard_get_modifiers(keyboard.wlr_keyboard)
+        sym = lib.pywl_keyboard_keysym(keyboard.wlr_keyboard, ev.keycode)
+        if (mods & lib.WLR_MODIFIER_ALT) and sym == keysym("Return"):
+            subprocess.Popen(server.terminal_cmd, shell=True)
+            return
     lib.wlr_seat_keyboard_notify_key(
         server.seat,
         ev.time_msec,
@@ -597,5 +613,5 @@ def raise_window(server: Server, window: Window) -> None:
 
 
 if __name__ == "__main__":
-    cmd = sys.argv[1] if len(sys.argv) > 1 else "alacritty"
-    sys.exit(main(cmd))
+    startup = sys.argv[1] if len(sys.argv) > 1 else None
+    sys.exit(main(startup))

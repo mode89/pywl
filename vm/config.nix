@@ -51,7 +51,7 @@ in {
   # Useful env so wlroots picks the right backend automatically when run from tty.
   environment.sessionVariables = {
     XDG_RUNTIME_DIR = "/run/user/1000";
-    TERM = "alacritty";
+    TERMINAL = "alacritty";
   };
 
   # 3D acceleration in guest.

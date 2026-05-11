@@ -270,9 +270,16 @@ void wlr_log_init(int verbosity, void *callback);
 
 // wl_pointer button state
 #define WL_POINTER_BUTTON_STATE_PRESSED ...
+#define WL_KEYBOARD_KEY_STATE_PRESSED ...
 
 // enum wlr_keyboard_modifier
 #define WLR_MODIFIER_ALT ...
+
+// Resolve a key name (e.g. "Return") to an xkb keysym, or 0 if unknown.
+uint32_t xkb_keysym_from_name(const char *name, int flags);
+
+// First xkb keysym for an event keycode on this keyboard, or 0.
+uint32_t pywl_keyboard_keysym(struct wlr_keyboard *kb, uint32_t keycode);
 
 // linux/input-event-codes.h
 #define BTN_LEFT ...
@@ -350,9 +357,17 @@ SOURCE = r"""
 #include <wlr/types/wlr_xcursor_manager.h>
 #include <wlr/types/wlr_xdg_shell.h>
 #include <wlr/util/log.h>
+#include <xkbcommon/xkbcommon.h>
 
 void pywl_signal_add(struct wl_signal *s, struct wl_listener *l) {
     wl_signal_add(s, l);
+}
+
+uint32_t pywl_keyboard_keysym(struct wlr_keyboard *kb, uint32_t keycode) {
+    const xkb_keysym_t *syms;
+    // wlr_keyboard_key_event.keycode is evdev; xkb expects +8.
+    int n = xkb_state_key_get_syms(kb->xkb_state, keycode + 8, &syms);
+    return n > 0 ? (uint32_t)syms[0] : 0;
 }
 
 struct wl_signal *pywl_backend_new_output(struct wlr_backend *b) {
