@@ -1,5 +1,20 @@
-#!/usr/bin/env bash
+#!/usr/bin/env python3
 
-SCRIPT_DIR=$(dirname "$(readlink -f "$0")")
-cd "$SCRIPT_DIR"
-nix-build "<nixpkgs/nixos>" -A vm -I nixos-config=./config.nix
+import argparse
+import os
+import subprocess
+import sys
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--gpu",
+    action="store_true", help="Enable virtio-gpu/virgl passthrough")
+args = parser.parse_args()
+
+os.chdir(os.path.dirname(os.path.realpath(__file__)))
+
+env = {**os.environ, "ARG_GPU": "1" if args.gpu else "0"}
+
+sys.exit(subprocess.call([
+    "nix-build", "<nixpkgs/nixos>", "-A", "vm",
+    "-I", "nixos-config=./config.nix",
+], env=env))

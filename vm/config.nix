@@ -1,6 +1,8 @@
 { config, pkgs, lib, ... }:
 
-{
+let
+  gpu = builtins.getEnv "ARG_GPU" == "1";
+in {
   system.stateVersion = "24.11";
 
   # Headed VM: graphical QEMU window with virtio-gpu + spice for decent input/video.
@@ -12,7 +14,7 @@
       { from = "host"; host.port = 2222; guest.port = 22; }
     ];
     # Hardware-accelerated virtio-gpu via virgl (host GPU passthrough for rendering).
-    qemu.options = [
+    qemu.options = lib.optionals gpu [
       "-device virtio-vga-gl"
       "-display gtk,gl=on,show-cursor=on"
     ];
