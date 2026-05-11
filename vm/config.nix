@@ -40,6 +40,10 @@
     vim
     tmux
     htop
+    xorg.xinit
+    (dwm.override { conf = ./dwm.config.h; })
+    xterm
+    alacritty
   ]) ++ (import ../deps.nix pkgs);
 
   # Useful env so wlroots picks the right backend automatically when run from tty.
