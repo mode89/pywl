@@ -6,19 +6,134 @@ and exec alacritty. No input handling, no window management.
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 import os
 import signal
 import subprocess
 import sys
 import time
 
-from bindings import ffi, lib, add_listener, remove_listener, _listeners
+from bindings import ffi, lib, listen
 
 
 WLR_DEBUG = 3  # enum wlr_log_importance
 
 
+@dataclass
+class Rect:
+    x: int
+    y: int
+    width: int
+    height: int
+
+
+@dataclass
+class Output:
+    wlr_output: object
+    width: int
+    height: int
+    enabled: bool = True
+    listeners: list[object] = field(default_factory=list)
+
+
+@dataclass
+class Window:
+    xdg_toplevel: object
+    scene_tree: object
+    surface: object
+    output: Output | None
+    geometry: Rect
+    handle: object = None  # ffi.new_handle keepalive for scene_tree data
+    listeners: list[object] = field(default_factory=list)
+
+
+@dataclass
+class Keyboard:
+    wlr_keyboard: object
+    listeners: list[object] = field(default_factory=list)
+
+
+@dataclass
+class Cursor:
+    wlr_cursor: object
+    xcursor_mgr: object
+    listeners: list[object]
+
+
+@dataclass
+class MoveGrab:
+    window: Window
+    grab_dx: float
+    grab_dy: float
+
+
+@dataclass
+class Server:
+    display: object
+    loop: object
+    backend: object
+    renderer: object
+    allocator: object
+    output_layout: object
+    scene: object
+    scene_layout: object
+    xdg_shell: object
+    seat: object
+    outputs: list[Output]
+    windows: list[Window]
+    keyboards: list[Keyboard]
+    listeners: list[object]
+    cursor: Cursor | None = None
+    keyboard_focus: Window | None = None
+    move_grab: MoveGrab | None = None
+    primary_output: Output | None = None
+
+
 def main(startup_cmd: str = "alacritty") -> int:
+    server = create_server()
+    if server is None:
+        return 1
+
+    socket = lib.wl_display_add_socket_auto(server.display)
+    if socket == ffi.NULL:
+        lib.wlr_backend_destroy(server.backend)
+        return 1
+    socket_str = ffi.string(socket).decode()
+
+    server.listeners = [
+        listen(
+            lib.pywl_backend_new_output(server.backend),
+            lambda data: on_output_new(server, data)),
+        listen(
+            lib.pywl_backend_new_input(server.backend),
+            lambda data: on_input_new(server, data)),
+        listen(
+            lib.pywl_xdg_shell_new_toplevel(server.xdg_shell),
+            lambda data: on_window_new(server, data)),
+    ]
+
+    server.cursor = create_cursor(server)
+
+    if not lib.wlr_backend_start(server.backend):
+        lib.wlr_backend_destroy(server.backend)
+        lib.wl_display_destroy(server.display)
+        return 1
+
+    os.environ["WAYLAND_DISPLAY"] = socket_str
+    sys.stderr.write(f"Running on WAYLAND_DISPLAY={socket_str}\n")
+
+    if startup_cmd:
+        subprocess.Popen(startup_cmd, shell=True)
+
+    run_event_loop(server)
+
+    destroy_server(server)
+
+    print(f"listeners remaining: {len(listen.listeners)}", file=sys.stderr)
+    return 0
+
+
+def create_server() -> Server | None:
     lib.wlr_log_init(WLR_DEBUG, ffi.NULL)
 
     display = lib.wl_display_create()
@@ -27,7 +142,7 @@ def main(startup_cmd: str = "alacritty") -> int:
     backend = lib.wlr_backend_autocreate(loop, ffi.NULL)
     if backend == ffi.NULL:
         sys.stderr.write("failed to create wlr_backend\n")
-        return 1
+        return None
 
     renderer = lib.wlr_renderer_autocreate(backend)
     lib.wlr_renderer_init_wl_display(renderer, display)
@@ -41,364 +156,444 @@ def main(startup_cmd: str = "alacritty") -> int:
     output_layout = lib.wlr_output_layout_create(display)
     scene = lib.wlr_scene_create()
     scene_layout = lib.wlr_scene_attach_output_layout(scene, output_layout)
-
     xdg_shell = lib.wlr_xdg_shell_create(display, 3)
 
-    cursor = lib.wlr_cursor_create()
-    lib.wlr_cursor_attach_output_layout(cursor, output_layout)
-    xcursor_mgr = lib.wlr_xcursor_manager_create(ffi.NULL, 24)
-    lib.wlr_xcursor_manager_load(xcursor_mgr, 1.0)
 
-    # First (and assumed only) output, populated on the new_output event.
-    primary_output = [ffi.NULL]
+    return Server(
+        display=display,
+        loop=loop,
+        backend=backend,
+        renderer=renderer,
+        allocator=allocator,
+        output_layout=output_layout,
+        scene=scene,
+        scene_layout=scene_layout,
+        xdg_shell=xdg_shell,
+        seat=lib.wlr_seat_create(display, b"seat0"),
+        outputs=[],
+        windows=[],
+        keyboards=[],
+        listeners=[],
+    )
 
-    # Maps scene_tree.node.data key -> (xdg_toplevel, scene_tree); used
-    # to recover the toplevel owning a hit-tested scene node.
-    toplevels: dict = {}
-    next_key = [1]
 
-    # Interactive move state, or None.
-    # Tuple: (xdg_toplevel, scene_tree, grab_dx, grab_dy)
-    move = [None]
-
-    # --- Output handling ----------------------------------------------------
-    def on_frame_for(wlr_output):
-        ts = ffi.new("struct timespec *")
-        def _on_frame(_data):
-            scene_output = lib.wlr_scene_get_scene_output(scene, wlr_output)
-            lib.wlr_scene_output_commit(scene_output, ffi.NULL)
-            ns = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
-            ts.tv_sec = ns // 1_000_000_000
-            ts.tv_nsec = ns % 1_000_000_000
-            lib.wlr_scene_output_send_frame_done(scene_output, ts)
-        return _on_frame
-
-    def on_new_output(data):
-        wlr_output = ffi.cast("struct wlr_output *", data)
-        if primary_output[0] == ffi.NULL:
-            primary_output[0] = wlr_output
-        lib.wlr_output_init_render(wlr_output, allocator, renderer)
-        state = lib.pywl_output_state_new()
-        lib.wlr_output_state_set_enabled(state, True)
-        mode = lib.wlr_output_preferred_mode(wlr_output)
-        if mode != ffi.NULL:
-            lib.wlr_output_state_set_mode(state, mode)
-        lib.wlr_output_commit_state(wlr_output, state)
-        lib.pywl_output_state_free(state)
-        layout_output = lib.wlr_output_layout_add_auto(
-            output_layout, wlr_output)
-        scene_output = lib.wlr_scene_output_create(scene, wlr_output)
-        lib.wlr_scene_output_layout_add_output(
-            scene_layout, layout_output, scene_output)
-        # Nested backends (Wayland/X11) request resize/scale via
-        # request_state; commit it to keep output and swapchain in sync.
-        def on_request_state(data):
-            lib.wlr_output_commit_state(
-                wlr_output, lib.pywl_output_event_request_state(data))
-
-        # Detach on output destroy; the freed wl_signal would otherwise
-        # still reference our listeners (use-after-free on next dispatch).
-        out_keys = [
-            add_listener(
-                lib.pywl_output_frame(wlr_output), on_frame_for(wlr_output)),
-            add_listener(
-                lib.pywl_output_request_state(wlr_output), on_request_state),
-        ]
-
-        def on_output_destroy(_data):
-            for k in out_keys:
-                remove_listener(k)
-            remove_listener(out_destroy_key)
-            if primary_output[0] == wlr_output:
-                primary_output[0] = ffi.NULL
-
-        out_destroy_key = add_listener(
-            lib.pywl_output_destroy_signal(wlr_output), on_output_destroy)
-
-    server_keys = []
-    server_keys.append(
-        add_listener(lib.pywl_backend_new_output(backend), on_new_output))
-
-    # --- Input handling -----------------------------------------------------
-    seat = lib.wlr_seat_create(display, b"seat0")
-    has_keyboard = [False]
-
-    def attach_keyboard(device):
-        kb = lib.wlr_keyboard_from_input_device(device)
-        # Default xkb keymap ("us").
-        ctx = lib.xkb_context_new(0)
-        keymap = lib.xkb_keymap_new_from_names(ctx, ffi.NULL, 0)
-        lib.wlr_keyboard_set_keymap(kb, keymap)
-        lib.xkb_keymap_unref(keymap)
-        lib.xkb_context_unref(ctx)
-        lib.wlr_keyboard_set_repeat_info(kb, 25, 600)
-
-        def on_modifiers(_data):
-            lib.wlr_seat_set_keyboard(seat, kb)
-            lib.wlr_seat_keyboard_notify_modifiers(seat,
-                lib.pywl_keyboard_modifiers_ptr(kb))
-
-        def on_key(data):
-            ev = ffi.cast("struct wlr_keyboard_key_event *", data)
-            lib.wlr_seat_set_keyboard(seat, kb)
-            lib.wlr_seat_keyboard_notify_key(
-                seat,
-                lib.pywl_key_event_time_msec(ev),
-                lib.pywl_key_event_keycode(ev),
-                lib.pywl_key_event_state(ev),
-            )
-
-        kb_keys = [
-            add_listener(lib.pywl_keyboard_modifiers_signal(kb), on_modifiers),
-            add_listener(lib.pywl_keyboard_key_signal(kb), on_key),
-        ]
-
-        def on_kb_destroy(_data):
-            for k in kb_keys:
-                remove_listener(k)
-            remove_listener(kb_destroy_key)
-
-        kb_destroy_key = add_listener(
-            lib.pywl_input_device_destroy_signal(device), on_kb_destroy)
-        lib.wlr_seat_set_keyboard(seat, kb)
-        has_keyboard[0] = True
-
-    def on_new_input(data):
-        device = ffi.cast("struct wlr_input_device *", data)
-        dtype = lib.pywl_input_device_type(device)
-        if dtype == lib.WLR_INPUT_DEVICE_KEYBOARD:
-            attach_keyboard(device)
-        elif dtype == lib.WLR_INPUT_DEVICE_POINTER:
-            lib.wlr_cursor_attach_input_device(cursor, device)
-        caps = lib.WL_SEAT_CAPABILITY_POINTER
-        if has_keyboard[0]:
-            caps |= lib.WL_SEAT_CAPABILITY_KEYBOARD
-        lib.wlr_seat_set_capabilities(seat, caps)
-
-    server_keys.append(
-        add_listener(lib.pywl_backend_new_input(backend), on_new_input))
-
-    def focus_surface(surface):
-        # NULL keycodes/modifiers means "no keys held, no modifiers active"
-        # at focus-enter time; subsequent key/modifier events refresh state.
-        lib.wlr_seat_keyboard_notify_enter(seat, surface, ffi.NULL, 0, ffi.NULL)
-
-    # --- Cursor / pointer ---------------------------------------------------
-    def surface_at(lx, ly):
-        """Return (info, surface, sx, sy) where info is (xdg, scene_tree),
-        or None if (lx, ly) doesn't land on a known toplevel's surface."""
-        sx = ffi.new("double *")
-        sy = ffi.new("double *")
-        root = lib.pywl_scene_tree_node(lib.pywl_scene_tree(scene))
-        node = lib.wlr_scene_node_at(root, lx, ly, sx, sy)
-        if node == ffi.NULL:
-            return None
-        if lib.pywl_scene_node_type(node) != lib.WLR_SCENE_NODE_BUFFER:
-            return None
-        buf = lib.wlr_scene_buffer_from_node(node)
-        ss = lib.wlr_scene_surface_try_from_buffer(buf)
-        if ss == ffi.NULL:
-            return None
-        # Walk up the parent chain to the first scene_tree whose node.data
-        # we set when creating the toplevel.
-        tree = lib.pywl_scene_node_parent(node)
-        while tree != ffi.NULL and \
-                lib.pywl_scene_node_data(
-                    lib.pywl_scene_tree_node(tree)) == ffi.NULL:
-            tree = lib.pywl_scene_node_parent(lib.pywl_scene_tree_node(tree))
-        if tree == ffi.NULL:
-            return None
-        data = lib.pywl_scene_node_data(lib.pywl_scene_tree_node(tree))
-        info = toplevels.get(int(ffi.cast("uintptr_t", data)))
-        if info is None:
-            return None
-        return info, lib.pywl_scene_surface_surface(ss), sx[0], sy[0]
-
-    def process_cursor_motion(time_msec):
-        if move[0] is not None:
-            _xdg, st, gx, gy = move[0]
-            x = lib.pywl_cursor_x(cursor) - gx
-            y = lib.pywl_cursor_y(cursor) - gy
-            lib.wlr_scene_node_set_position(
-                lib.pywl_scene_tree_node(st), int(x), int(y))
-            return
-        hit = surface_at(lib.pywl_cursor_x(cursor), lib.pywl_cursor_y(cursor))
-        if hit is None:
-            lib.wlr_cursor_set_xcursor(cursor, xcursor_mgr, b"default")
-            lib.wlr_seat_pointer_clear_focus(seat)
-            return
-        _info, surface, sx, sy = hit
-        lib.wlr_seat_pointer_notify_enter(seat, surface, sx, sy)
-        lib.wlr_seat_pointer_notify_motion(seat, time_msec, sx, sy)
-
-    def on_cursor_motion(data):
-        ev = ffi.cast("struct wlr_pointer_motion_event *", data)
-        lib.wlr_cursor_move(
-            cursor, ffi.NULL,
-            lib.pywl_pmotion_delta_x(ev), lib.pywl_pmotion_delta_y(ev))
-        process_cursor_motion(lib.pywl_pmotion_time_msec(ev))
-
-    def on_cursor_motion_absolute(data):
-        ev = ffi.cast("struct wlr_pointer_motion_absolute_event *", data)
-        lib.wlr_cursor_warp_absolute(
-            cursor, ffi.NULL,
-            lib.pywl_pmotion_abs_x(ev), lib.pywl_pmotion_abs_y(ev))
-        process_cursor_motion(lib.pywl_pmotion_abs_time_msec(ev))
-
-    def on_cursor_button(data):
-        ev = ffi.cast("struct wlr_pointer_button_event *", data)
-        state = lib.pywl_pbutton_state(ev)
-        button = lib.pywl_pbutton_button(ev)
-        time_msec = lib.pywl_pbutton_time_msec(ev)
-        if state == lib.WL_POINTER_BUTTON_STATE_PRESSED:
-            kb = lib.wlr_seat_get_keyboard(seat)
-            mods = lib.wlr_keyboard_get_modifiers(kb) if kb != ffi.NULL else 0
-            hit = surface_at(
-                lib.pywl_cursor_x(cursor), lib.pywl_cursor_y(cursor))
-            if hit is not None:
-                (xdg, st), surface, _sx, _sy = hit
-                if (mods & lib.WLR_MODIFIER_ALT) and button == lib.BTN_LEFT:
-                    node = lib.pywl_scene_tree_node(st)
-                    gx = lib.pywl_cursor_x(cursor) - lib.pywl_scene_node_x(node)
-                    gy = lib.pywl_cursor_y(cursor) - lib.pywl_scene_node_y(node)
-                    move[0] = (xdg, st, gx, gy)
-                    return  # don't forward to client
-                lib.wlr_scene_node_raise_to_top(lib.pywl_scene_tree_node(st))
-                focus_surface(surface)
-            else:
-                lib.wlr_seat_keyboard_clear_focus(seat)
-        else:  # release
-            if move[0] is not None:
-                move[0] = None
-                return
-        lib.wlr_seat_pointer_notify_button(seat, time_msec, button, state)
-
-    def on_cursor_axis(data):
-        ev = ffi.cast("struct wlr_pointer_axis_event *", data)
-        lib.wlr_seat_pointer_notify_axis(
-            seat,
-            lib.pywl_paxis_time_msec(ev),
-            lib.pywl_paxis_orientation(ev),
-            lib.pywl_paxis_delta(ev),
-            lib.pywl_paxis_delta_discrete(ev),
-            lib.pywl_paxis_source(ev),
-            lib.pywl_paxis_relative_direction(ev),
-        )
-
-    def on_cursor_frame(_data):
-        lib.wlr_seat_pointer_notify_frame(seat)
-
-    cursor_keys = [
-        add_listener(lib.pywl_cursor_motion(cursor), on_cursor_motion),
-        add_listener(
-            lib.pywl_cursor_motion_absolute(cursor), on_cursor_motion_absolute),
-        add_listener(lib.pywl_cursor_button(cursor), on_cursor_button),
-        add_listener(lib.pywl_cursor_axis(cursor), on_cursor_axis),
-        add_listener(lib.pywl_cursor_frame(cursor), on_cursor_frame),
-    ]
-
-    # --- xdg-shell handling -------------------------------------------------
-    def commit_handler_for(xdg_toplevel, scene_tree):
-        base = lib.pywl_toplevel_base(xdg_toplevel)
-        def _on_commit(_data):
-            # Initial commit requires a configure so the client can map.
-            # Place the window centered at 80% of the output's size.
-            if lib.pywl_xdg_surface_initial_commit(base):
-                out = primary_output[0]
-                if out != ffi.NULL:
-                    ow = lib.pywl_output_width(out)
-                    oh = lib.pywl_output_height(out)
-                    w, h = int(ow * 0.8), int(oh * 0.8)
-                    lib.wlr_xdg_toplevel_set_size(xdg_toplevel, w, h)
-                    lib.wlr_scene_node_set_position(
-                        lib.pywl_scene_tree_node(scene_tree),
-                        (ow - w) // 2, (oh - h) // 2,
-                    )
-                else:
-                    lib.wlr_xdg_toplevel_set_size(xdg_toplevel, 0, 0)
-        return _on_commit
-
-    def on_new_xdg_toplevel(data):
-        xdg_toplevel = ffi.cast("struct wlr_xdg_toplevel *", data)
-        base = lib.pywl_toplevel_base(xdg_toplevel)
-        scene_tree = lib.wlr_scene_xdg_surface_create(
-            lib.pywl_scene_tree(scene), base)
-
-        # Tag the scene_tree with an integer key so hit-testing can find
-        # the owning toplevel via scene_node.data.
-        key = next_key[0]
-        next_key[0] += 1
-        toplevels[key] = (xdg_toplevel, scene_tree)
-        lib.pywl_scene_tree_set_data(scene_tree, ffi.cast("void *", key))
-
-        surface = lib.pywl_xdg_surface_surface(base)
-
-        # Detach surface listeners on toplevel destroy; libwayland aborts
-        # on dangling listeners after wlroots frees the surface.
-        keys = [
-            add_listener(lib.pywl_surface_commit(surface),
-                         commit_handler_for(xdg_toplevel, scene_tree)),
-            add_listener(lib.pywl_surface_map(surface),
-                         lambda _d: focus_surface(surface)),
-        ]
-
-        def on_destroy(_data):
-            for k in keys:
-                remove_listener(k)
-            remove_listener(destroy_key)
-            toplevels.pop(key, None)
-            if move[0] is not None and move[0][0] == xdg_toplevel:
-                move[0] = None
-
-        destroy_key = add_listener(
-            lib.pywl_xdg_toplevel_destroy(xdg_toplevel), on_destroy)
-
-    server_keys.append(add_listener(
-        lib.pywl_xdg_shell_new_toplevel(xdg_shell), on_new_xdg_toplevel))
-
-    socket = lib.wl_display_add_socket_auto(display)
-    if socket == ffi.NULL:
-        lib.wlr_backend_destroy(backend)
-        return 1
-    socket_str = ffi.string(socket).decode()
-
-    if not lib.wlr_backend_start(backend):
-        lib.wlr_backend_destroy(backend)
-        lib.wl_display_destroy(display)
-        return 1
-
-    os.environ["WAYLAND_DISPLAY"] = socket_str
-    sys.stderr.write(f"Running on WAYLAND_DISPLAY={socket_str}\n")
-
-    if startup_cmd:
-        subprocess.Popen(startup_cmd, shell=True)
-
-    # 10Hz loop so signals are serviced between iterations; the handler
-    # only flags (raising mid-cffi-callback would leak listeners).
+def run_event_loop(server: Server) -> None:
     stop = False
-    def _stop(_sig, _frm):
+
+    def on_stop(_sig, _frm):
         nonlocal stop
         stop = True
-    signal.signal(signal.SIGINT, _stop)
-    signal.signal(signal.SIGTERM, _stop)
+
+    signal.signal(signal.SIGINT, on_stop)
+    signal.signal(signal.SIGTERM, on_stop)
     while not stop:
-        lib.wl_display_flush_clients(display)
-        lib.wl_event_loop_dispatch(loop, 100)
+        lib.wl_display_flush_clients(server.display)
+        lib.wl_event_loop_dispatch(server.loop, 100)
 
-    lib.wl_display_destroy_clients(display)
-    for k in cursor_keys + server_keys:
-        remove_listener(k)
-    lib.wlr_scene_node_destroy(
-        lib.pywl_scene_tree_node(lib.pywl_scene_tree(scene)))
-    lib.wlr_xcursor_manager_destroy(xcursor_mgr)
-    lib.wlr_cursor_destroy(cursor)
-    lib.wlr_allocator_destroy(allocator)
-    lib.wlr_renderer_destroy(renderer)
-    lib.wl_display_destroy(display)
 
-    print(f"listeners remaining: {len(_listeners)}", file=sys.stderr)
+def destroy_server(server: Server) -> None:
+    lib.wl_display_destroy_clients(server.display)
+    for handle in server.listeners:
+        handle.remove()
+    lib.wlr_scene_node_destroy(ffi.addressof(server.scene.tree.node))
+    destroy_cursor(server.cursor)
+    lib.wlr_allocator_destroy(server.allocator)
+    lib.wlr_renderer_destroy(server.renderer)
+    lib.wl_display_destroy(server.display)
 
-    return 0
+
+def on_output_new(server: Server, data) -> Output:
+    wlr_output = ffi.cast("struct wlr_output *", data)
+    lib.wlr_output_init_render(wlr_output, server.allocator, server.renderer)
+    output_state = lib.pywl_output_state_new()
+    lib.wlr_output_state_set_enabled(output_state, True)
+    mode = lib.wlr_output_preferred_mode(wlr_output)
+    if mode != ffi.NULL:
+        lib.wlr_output_state_set_mode(output_state, mode)
+    lib.wlr_output_commit_state(wlr_output, output_state)
+    lib.pywl_output_state_free(output_state)
+
+    output = Output(
+        wlr_output,
+        wlr_output.width,
+        wlr_output.height,
+    )
+    server.outputs.append(output)
+    if server.primary_output is None:
+        server.primary_output = output
+
+    layout_output = lib.wlr_output_layout_add_auto(
+        server.output_layout, wlr_output)
+    scene_output = lib.wlr_scene_output_create(server.scene, wlr_output)
+    lib.wlr_scene_output_layout_add_output(
+        server.scene_layout, layout_output, scene_output)
+
+    timestamp = ffi.new("struct timespec *")
+    def on_frame(data):
+        ns = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+        timestamp.tv_sec = ns // 1_000_000_000
+        timestamp.tv_nsec = ns % 1_000_000_000
+        on_output_frame(server, output, timestamp, data)
+
+    output.listeners = [
+        listen(lib.pywl_output_frame(wlr_output), on_frame),
+        listen(
+            lib.pywl_output_request_state(wlr_output),
+            lambda data: on_output_request_state(server, output, data)),
+        listen(
+            lib.pywl_output_destroy_signal(wlr_output),
+            lambda data: on_output_destroy(server, output, data)),
+    ]
+
+    return output
+
+
+def on_output_request_state(server: Server, output: Output, data):
+    ev = ffi.cast("struct wlr_output_event_request_state *", data)
+    lib.wlr_output_commit_state(output.wlr_output, ev.state)
+
+
+def on_output_frame(server: Server, output: Output, timestamp, _data):
+    scene_output = lib.wlr_scene_get_scene_output(
+        server.scene, output.wlr_output)
+    lib.wlr_scene_output_commit(scene_output, ffi.NULL)
+    lib.wlr_scene_output_send_frame_done(scene_output, timestamp)
+
+
+def on_output_destroy(server: Server, output: Output, _data) -> None:
+    for listener in output.listeners:
+        listener.remove()
+    if output in server.outputs:
+        server.outputs.remove(output)
+    if server.primary_output is output:
+        server.primary_output = None
+
+
+def on_input_new(server: Server, data) -> None:
+    device = ffi.cast("struct wlr_input_device *", data)
+    dtype = device.type
+    if dtype == lib.WLR_INPUT_DEVICE_KEYBOARD:
+        on_keyboard_new(server, device)
+    elif dtype == lib.WLR_INPUT_DEVICE_POINTER:
+        lib.wlr_cursor_attach_input_device(server.cursor.wlr_cursor, device)
+    caps = lib.WL_SEAT_CAPABILITY_POINTER
+    if server.keyboards:
+        caps |= lib.WL_SEAT_CAPABILITY_KEYBOARD
+    lib.wlr_seat_set_capabilities(server.seat, caps)
+
+
+def on_keyboard_new(server: Server, device) -> Keyboard:
+    wlr_keyboard = lib.wlr_keyboard_from_input_device(device)
+    ctx = lib.xkb_context_new(0)
+    keymap = lib.xkb_keymap_new_from_names(ctx, ffi.NULL, 0)
+    lib.wlr_keyboard_set_keymap(wlr_keyboard, keymap)
+    lib.xkb_keymap_unref(keymap)
+    lib.xkb_context_unref(ctx)
+    lib.wlr_keyboard_set_repeat_info(wlr_keyboard, 25, 600)
+
+    keyboard = Keyboard(wlr_keyboard)
+    server.keyboards.append(keyboard)
+
+    keyboard.listeners = [
+        listen(
+            lib.pywl_keyboard_modifiers_signal(wlr_keyboard),
+            lambda data: on_keyboard_modifiers(server, keyboard, data)),
+        listen(
+            lib.pywl_keyboard_key_signal(wlr_keyboard),
+            lambda data: on_keyboard_key(server, keyboard, data)),
+        listen(
+            lib.pywl_input_device_destroy_signal(device),
+            lambda data: on_keyboard_destroy(server, keyboard, data)),
+    ]
+
+    lib.wlr_seat_set_keyboard(server.seat, wlr_keyboard)
+    return keyboard
+
+
+def on_keyboard_modifiers(server: Server, keyboard: Keyboard, _data) -> None:
+    lib.wlr_seat_set_keyboard(server.seat, keyboard.wlr_keyboard)
+    lib.wlr_seat_keyboard_notify_modifiers(
+        server.seat, ffi.addressof(keyboard.wlr_keyboard.modifiers))
+
+
+def on_keyboard_key(server: Server, keyboard: Keyboard, data) -> None:
+    ev = ffi.cast("struct wlr_keyboard_key_event *", data)
+    lib.wlr_seat_set_keyboard(server.seat, keyboard.wlr_keyboard)
+    lib.wlr_seat_keyboard_notify_key(
+        server.seat,
+        ev.time_msec,
+        ev.keycode,
+        ev.state,
+    )
+
+
+def on_keyboard_destroy(server: Server, keyboard: Keyboard, _data) -> None:
+    for listener in keyboard.listeners:
+        listener.remove()
+    if keyboard in server.keyboards:
+        server.keyboards.remove(keyboard)
+
+
+def create_cursor(server: Server) -> Cursor:
+    wlr_cursor = lib.wlr_cursor_create()
+    lib.wlr_cursor_attach_output_layout(wlr_cursor, server.output_layout)
+    xcursor_mgr = lib.wlr_xcursor_manager_create(ffi.NULL, 24)
+    lib.wlr_xcursor_manager_load(xcursor_mgr, 1.0)
+    return Cursor(
+        wlr_cursor,
+        xcursor_mgr,
+        [
+            listen(
+                lib.pywl_cursor_motion(wlr_cursor),
+                lambda data: on_cursor_motion(server, data)),
+            listen(
+                lib.pywl_cursor_motion_absolute(wlr_cursor),
+                lambda data: on_cursor_motion_absolute(server, data)),
+            listen(
+                lib.pywl_cursor_button(wlr_cursor),
+                lambda data: on_cursor_button(server, data)),
+            listen(
+                lib.pywl_cursor_axis(wlr_cursor),
+                lambda data: on_cursor_axis(server, data)),
+            listen(
+                lib.pywl_cursor_frame(wlr_cursor),
+                lambda data: on_cursor_frame(server, data)),
+        ]
+    )
+
+
+def destroy_cursor(cursor: Cursor) -> None:
+    for listener in cursor.listeners:
+        listener.remove()
+    lib.wlr_xcursor_manager_destroy(cursor.xcursor_mgr)
+    lib.wlr_cursor_destroy(cursor.wlr_cursor)
+
+
+def on_cursor_motion(server: Server, data) -> None:
+    ev = ffi.cast("struct wlr_pointer_motion_event *", data)
+    lib.wlr_cursor_move(
+        server.cursor.wlr_cursor, ffi.NULL,
+        ev.delta_x, ev.delta_y)
+    process_cursor_motion(server, ev.time_msec)
+
+
+def on_cursor_motion_absolute(server: Server, data) -> None:
+    ev = ffi.cast("struct wlr_pointer_motion_absolute_event *", data)
+    lib.wlr_cursor_warp_absolute(
+        server.cursor.wlr_cursor, ffi.NULL,
+        ev.x, ev.y)
+    process_cursor_motion(server, ev.time_msec)
+
+
+def on_cursor_button(server: Server, data) -> None:
+    handle_cursor_button(server, data)
+
+
+def on_cursor_axis(server: Server, data) -> None:
+    ev = ffi.cast("struct wlr_pointer_axis_event *", data)
+    lib.wlr_seat_pointer_notify_axis(
+        server.seat,
+        ev.time_msec,
+        ev.orientation,
+        ev.delta,
+        ev.delta_discrete,
+        ev.source,
+        ev.relative_direction,
+    )
+
+
+def on_cursor_frame(server: Server, _data) -> None:
+    lib.wlr_seat_pointer_notify_frame(server.seat)
+
+
+def process_cursor_motion(server: Server, time_msec: int) -> None:
+    cx = server.cursor.wlr_cursor.x
+    cy = server.cursor.wlr_cursor.y
+    if server.move_grab is not None:
+        grab = server.move_grab
+        x = int(cx - grab.grab_dx)
+        y = int(cy - grab.grab_dy)
+        lib.wlr_scene_node_set_position(
+            ffi.addressof(grab.window.scene_tree.node), x, y)
+        grab.window.geometry.x = x
+        grab.window.geometry.y = y
+        return
+
+    hit = surface_at(server, cx, cy)
+    if hit is None:
+        lib.wlr_cursor_set_xcursor(
+            server.cursor.wlr_cursor, server.cursor.xcursor_mgr, b"default")
+        lib.wlr_seat_pointer_clear_focus(server.seat)
+        return
+    _window, surface, sx, sy = hit
+    lib.wlr_seat_pointer_notify_enter(server.seat, surface, sx, sy)
+    lib.wlr_seat_pointer_notify_motion(server.seat, time_msec, sx, sy)
+
+
+def handle_cursor_button(server: Server, data) -> None:
+    ev = ffi.cast("struct wlr_pointer_button_event *", data)
+    button_state = ev.state
+    button = ev.button
+    time_msec = ev.time_msec
+    pressed = button_state == lib.WL_POINTER_BUTTON_STATE_PRESSED
+
+    if pressed:
+        kb = lib.wlr_seat_get_keyboard(server.seat)
+        mods = lib.wlr_keyboard_get_modifiers(kb) if kb != ffi.NULL else 0
+        hit = surface_at(
+            server,
+            server.cursor.wlr_cursor.x,
+            server.cursor.wlr_cursor.y)
+        if hit is not None:
+            window, surface, _sx, _sy = hit
+            if (mods & lib.WLR_MODIFIER_ALT) and button == lib.BTN_LEFT:
+                start_move_grab(server, window)
+                return
+            raise_window(server, window)
+            focus_window(server, window, surface)
+        else:
+            clear_keyboard_focus(server)
+    elif server.move_grab is not None:
+        server.move_grab = None
+        return
+
+    lib.wlr_seat_pointer_notify_button(
+        server.seat, time_msec, button, button_state)
+
+
+def surface_at(server: Server, lx, ly):
+    """Return (window, surface, sx, sy), or None if there is no hit."""
+    sx = ffi.new("double *")
+    sy = ffi.new("double *")
+    node = lib.wlr_scene_node_at(
+        ffi.addressof(server.scene.tree.node), lx, ly, sx, sy)
+    if node == ffi.NULL:
+        return None
+    if node.type != lib.WLR_SCENE_NODE_BUFFER:
+        return None
+    buf = lib.wlr_scene_buffer_from_node(node)
+    ss = lib.wlr_scene_surface_try_from_buffer(buf)
+    if ss == ffi.NULL:
+        return None
+
+    tree = node.parent
+    while tree != ffi.NULL and tree.node.data == ffi.NULL:
+        tree = tree.node.parent
+    if tree == ffi.NULL:
+        return None
+
+    window = ffi.from_handle(tree.node.data)
+    if window not in server.windows:
+        return None
+    return window, ss.surface, sx[0], sy[0]
+
+
+def on_window_new(server: Server, data) -> Window:
+    xdg_toplevel = ffi.cast("struct wlr_xdg_toplevel *", data)
+    base = xdg_toplevel.base
+    scene_tree = lib.wlr_scene_xdg_surface_create(
+        ffi.addressof(server.scene.tree), base)
+    surface = base.surface
+
+    window = Window(
+        xdg_toplevel, scene_tree, surface,
+        server.primary_output, Rect(0, 0, 0, 0),
+    )
+    window.handle = ffi.new_handle(window)
+    server.windows.append(window)
+
+    scene_tree.node.data = window.handle
+
+    window.listeners = [
+        listen(
+            lib.pywl_surface_commit(surface),
+            lambda data: on_window_commit(server, window, data)),
+        listen(
+            lib.pywl_surface_map(surface),
+            lambda data: on_window_map(server, window, data)),
+        listen(
+            lib.pywl_xdg_toplevel_destroy(xdg_toplevel),
+            lambda data: on_window_destroy(server, window, data)),
+    ]
+
+    return window
+
+
+def on_window_destroy(server: Server, window: Window, _data) -> None:
+    """Called when an app closes one of its windows."""
+    for listener in window.listeners:
+        listener.remove()
+    if window in server.windows:
+        server.windows.remove(window)
+    if server.keyboard_focus is window:
+        server.keyboard_focus = None
+    if server.move_grab is not None and server.move_grab.window is window:
+        server.move_grab = None
+
+
+def on_window_commit(server: Server, window: Window, _data) -> None:
+    """Called whenever an app updates a window."""
+    base = window.xdg_toplevel.base
+    if not base.initial_commit:
+        return
+
+    out = current_output_ptr(server)
+    if out != ffi.NULL:
+        ow = out.width
+        oh = out.height
+        w, h = int(ow * 0.8), int(oh * 0.8)
+        geometry = Rect((ow - w) // 2, (oh - h) // 2, w, h)
+        lib.wlr_xdg_toplevel_set_size(
+            window.xdg_toplevel, geometry.width, geometry.height)
+        lib.wlr_scene_node_set_position(
+            ffi.addressof(window.scene_tree.node),
+            geometry.x, geometry.y)
+    else:
+        geometry = Rect(0, 0, 0, 0)
+        lib.wlr_xdg_toplevel_set_size(window.xdg_toplevel, 0, 0)
+
+    window.geometry = geometry
+    window.output = server.primary_output
+
+
+def on_window_map(server: Server, window: Window, _data) -> None:
+    """Called the moment a window first has pixels to show on screen."""
+    focus_window(server, window, window.surface)
+
+
+def current_output_ptr(server: Server):
+    output = server.primary_output
+    return output.wlr_output if output is not None else ffi.NULL
+
+
+def focus_surface(server: Server, surface) -> None:
+    lib.wlr_seat_keyboard_notify_enter(
+        server.seat, surface, ffi.NULL, 0, ffi.NULL)
+
+
+def focus_window(server: Server, window: Window, surface) -> None:
+    focus_surface(server, surface)
+    for w in server.windows:
+        lib.wlr_xdg_toplevel_set_activated(w.xdg_toplevel, w is window)
+    server.keyboard_focus = window
+
+
+def clear_keyboard_focus(server: Server) -> None:
+    lib.wlr_seat_keyboard_clear_focus(server.seat)
+    for window in server.windows:
+        lib.wlr_xdg_toplevel_set_activated(window.xdg_toplevel, False)
+    server.keyboard_focus = None
+
+
+def start_move_grab(server: Server, window: Window) -> None:
+    node = window.scene_tree.node
+    gx = server.cursor.wlr_cursor.x - node.x
+    gy = server.cursor.wlr_cursor.y - node.y
+    server.move_grab = MoveGrab(window, gx, gy)
+
+
+def raise_window(server: Server, window: Window) -> None:
+    lib.wlr_scene_node_raise_to_top(ffi.addressof(window.scene_tree.node))
 
 
 if __name__ == "__main__":
