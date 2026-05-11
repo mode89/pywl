@@ -164,6 +164,7 @@ struct wlr_xdg_shell *wlr_xdg_shell_create(
         struct wl_display *, uint32_t version);
 void wlr_xdg_toplevel_set_size(struct wlr_xdg_toplevel *, int32_t, int32_t);
 uint32_t wlr_xdg_toplevel_set_activated(struct wlr_xdg_toplevel *, bool activated);
+void wlr_xdg_toplevel_send_close(struct wlr_xdg_toplevel *);
 
 struct wlr_seat *wlr_seat_create(struct wl_display *, const char *);
 void wlr_seat_set_capabilities(struct wlr_seat *, uint32_t caps);
@@ -274,6 +275,7 @@ void wlr_log_init(int verbosity, void *callback);
 
 // enum wlr_keyboard_modifier
 #define WLR_MODIFIER_ALT ...
+#define WLR_MODIFIER_SHIFT ...
 
 // Resolve a key name (e.g. "Return") to an xkb keysym, or 0 if unknown.
 uint32_t xkb_keysym_from_name(const char *name, int flags);
@@ -283,6 +285,7 @@ uint32_t pywl_keyboard_keysym(struct wlr_keyboard *kb, uint32_t keycode);
 
 // linux/input-event-codes.h
 #define BTN_LEFT ...
+#define BTN_RIGHT ...
 
 // our helpers
 void pywl_signal_add(struct wl_signal *, struct wl_listener *);

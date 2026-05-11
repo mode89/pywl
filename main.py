@@ -68,6 +68,15 @@ class MoveGrab:
 
 
 @dataclass
+class ResizeGrab:
+    window: Window
+    start_cx: float
+    start_cy: float
+    start_w: int
+    start_h: int
+
+
+@dataclass
 class Server:
     display: object
     loop: object
@@ -86,8 +95,10 @@ class Server:
     cursor: Cursor | None = None
     keyboard_focus: Window | None = None
     move_grab: MoveGrab | None = None
+    resize_grab: ResizeGrab | None = None
     primary_output: Output | None = None
     terminal_cmd: str = "xterm"
+    stop: bool = False
 
 
 def main(startup_cmd: str | None = None) -> int:
@@ -180,15 +191,12 @@ def create_server() -> Server | None:
 
 
 def run_event_loop(server: Server) -> None:
-    stop = False
-
     def on_stop(_sig, _frm):
-        nonlocal stop
-        stop = True
+        server.stop = True
 
     signal.signal(signal.SIGINT, on_stop)
     signal.signal(signal.SIGTERM, on_stop)
-    while not stop:
+    while not server.stop:
         lib.wl_display_flush_clients(server.display)
         lib.wl_event_loop_dispatch(server.loop, 100)
 
@@ -332,8 +340,7 @@ def on_keyboard_key(server: Server, keyboard: Keyboard, data) -> None:
     if ev.state == lib.WL_KEYBOARD_KEY_STATE_PRESSED:
         mods = lib.wlr_keyboard_get_modifiers(keyboard.wlr_keyboard)
         sym = lib.pywl_keyboard_keysym(keyboard.wlr_keyboard, ev.keycode)
-        if (mods & lib.WLR_MODIFIER_ALT) and sym == keysym("Return"):
-            subprocess.Popen(server.terminal_cmd, shell=True)
+        if handle_keybinding(server, mods, sym):
             return
     lib.wlr_seat_keyboard_notify_key(
         server.seat,
@@ -341,6 +348,41 @@ def on_keyboard_key(server: Server, keyboard: Keyboard, data) -> None:
         ev.keycode,
         ev.state,
     )
+
+
+def handle_keybinding(server: Server, mods: int, sym: int) -> bool:
+    """Return True if `sym` was consumed as a compositor keybinding."""
+    alt = bool(mods & lib.WLR_MODIFIER_ALT)
+    shift = bool(mods & lib.WLR_MODIFIER_SHIFT)
+    if not alt:
+        return False
+    if sym == keysym("Return"):
+        subprocess.Popen(server.terminal_cmd, shell=True)
+        return True
+    if sym == keysym("Tab"):
+        cycle_focus(server)
+        return True
+    if shift and sym in (keysym("q"), keysym("Q")):
+        if server.keyboard_focus is not None:
+            lib.wlr_xdg_toplevel_send_close(server.keyboard_focus.xdg_toplevel)
+        return True
+    if shift and sym in (keysym("e"), keysym("E")):
+        server.stop = True
+        return True
+    return False
+
+
+def cycle_focus(server: Server) -> None:
+    if len(server.windows) < 2:
+        return
+    current = server.keyboard_focus
+    if current in server.windows:
+        i = server.windows.index(current)
+        nxt = server.windows[(i + 1) % len(server.windows)]
+    else:
+        nxt = server.windows[0]
+    raise_window(server, nxt)
+    focus_window(server, nxt, nxt.surface)
 
 
 def on_keyboard_destroy(server: Server, keyboard: Keyboard, _data) -> None:
@@ -434,6 +476,14 @@ def process_cursor_motion(server: Server, time_msec: int) -> None:
         grab.window.geometry.x = x
         grab.window.geometry.y = y
         return
+    if server.resize_grab is not None:
+        grab = server.resize_grab
+        w = max(40, int(grab.start_w + (cx - grab.start_cx)))
+        h = max(20, int(grab.start_h + (cy - grab.start_cy)))
+        lib.wlr_xdg_toplevel_set_size(grab.window.xdg_toplevel, w, h)
+        grab.window.geometry.width = w
+        grab.window.geometry.height = h
+        return
 
     hit = surface_at(server, cx, cy)
     if hit is None:
@@ -465,12 +515,16 @@ def handle_cursor_button(server: Server, data) -> None:
             if (mods & lib.WLR_MODIFIER_ALT) and button == lib.BTN_LEFT:
                 start_move_grab(server, window)
                 return
+            if (mods & lib.WLR_MODIFIER_ALT) and button == lib.BTN_RIGHT:
+                start_resize_grab(server, window)
+                return
             raise_window(server, window)
             focus_window(server, window, surface)
         else:
             clear_keyboard_focus(server)
-    elif server.move_grab is not None:
+    elif server.move_grab is not None or server.resize_grab is not None:
         server.move_grab = None
+        server.resize_grab = None
         return
 
     lib.wlr_seat_pointer_notify_button(
@@ -545,6 +599,8 @@ def on_window_destroy(server: Server, window: Window, _data) -> None:
         server.keyboard_focus = None
     if server.move_grab is not None and server.move_grab.window is window:
         server.move_grab = None
+    if server.resize_grab is not None and server.resize_grab.window is window:
+        server.resize_grab = None
 
 
 def on_window_commit(server: Server, window: Window, _data) -> None:
@@ -606,6 +662,16 @@ def start_move_grab(server: Server, window: Window) -> None:
     gx = server.cursor.wlr_cursor.x - node.x
     gy = server.cursor.wlr_cursor.y - node.y
     server.move_grab = MoveGrab(window, gx, gy)
+
+
+def start_resize_grab(server: Server, window: Window) -> None:
+    server.resize_grab = ResizeGrab(
+        window,
+        server.cursor.wlr_cursor.x,
+        server.cursor.wlr_cursor.y,
+        window.geometry.width,
+        window.geometry.height,
+    )
 
 
 def raise_window(server: Server, window: Window) -> None:
