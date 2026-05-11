@@ -133,6 +133,9 @@ def main(startup_cmd: str | None = None) -> int:
         listen(
             lib.pywl_xdg_shell_new_popup(server.xdg_shell),
             lambda data: on_popup_new(server, data)),
+        listen(
+            lib.pywl_seat_request_set_selection(server.seat),
+            lambda data: on_seat_request_set_selection(server, data)),
     ]
 
     server.cursor = create_cursor(server)
@@ -680,6 +683,11 @@ def on_popup_destroy(server: Server, popup: Popup, _data) -> None:
         listener.remove()
     if popup in server.popups:
         server.popups.remove(popup)
+
+
+def on_seat_request_set_selection(server: Server, data) -> None:
+    ev = ffi.cast("struct wlr_seat_request_set_selection_event *", data)
+    lib.wlr_seat_set_selection(server.seat, ev.source, ev.serial)
 
 
 def current_output_ptr(server: Server):
