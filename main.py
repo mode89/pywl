@@ -1,7 +1,7 @@
 """Minimal wlroots-based Wayland compositor that spawns a terminal on startup.
 
 Just enough to bring up an output, accept xdg-shell clients, render a scene,
-and exec alacritty. No input handling, no window management.
+and exec alacritty. No input handling, no view management.
 """
 
 from __future__ import annotations
@@ -50,14 +50,17 @@ class Rect:
 
 
 @dataclass
-class Window:
-    xdg_toplevel: object
+class View:
     scene_tree: object
     surface: object
-    output: Output | None
     geometry: Rect
     handle: object = None  # ffi.new_handle keepalive for scene_tree data
     listeners: list[object] = field(default_factory=list)
+
+
+@dataclass
+class XdgView(View):
+    xdg_toplevel: object = None
 
 
 @dataclass
@@ -68,14 +71,14 @@ class Popup:
 
 @dataclass
 class MoveGrab:
-    window: Window
+    view: XdgView
     grab_dx: float
     grab_dy: float
 
 
 @dataclass
 class ResizeGrab:
-    window: Window
+    view: XdgView
     start_cx: float
     start_cy: float
     start_w: int
@@ -95,12 +98,12 @@ class Server:
     xdg_shell: object
     seat: object
     outputs: list[Output]
-    windows: list[Window]
+    views: list[XdgView]
     keyboards: list[Keyboard]
     popups: list[Popup]
     listeners: list[object]
     cursor: Cursor | None = None
-    keyboard_focus: Window | None = None
+    focused_view: XdgView | None = None
     move_grab: MoveGrab | None = None
     resize_grab: ResizeGrab | None = None
     primary_output: Output | None = None
@@ -129,7 +132,7 @@ def main(startup_cmd: str | None = None) -> int:
             lambda data: on_input_new(server, data)),
         listen(
             lib.pywl_xdg_shell_new_toplevel(server.xdg_shell),
-            lambda data: on_window_new(server, data)),
+            lambda data: xdg_view_on_new(server, data)),
         listen(
             lib.pywl_xdg_shell_new_popup(server.xdg_shell),
             lambda data: on_popup_new(server, data)),
@@ -197,7 +200,7 @@ def create_server() -> Server | None:
         xdg_shell=xdg_shell,
         seat=lib.wlr_seat_create(display, b"seat0"),
         outputs=[],
-        windows=[],
+        views=[],
         keyboards=[],
         popups=[],
         listeners=[],
@@ -375,11 +378,11 @@ def handle_keybinding(server: Server, mods: int, sym: int) -> bool:
         subprocess.Popen(server.terminal_cmd, shell=True)
         return True
     if sym == keysym("Tab"):
-        cycle_focus(server)
+        xdg_view_cycle_focus(server)
         return True
     if shift and sym in (keysym("q"), keysym("Q")):
-        if server.keyboard_focus is not None:
-            lib.wlr_xdg_toplevel_send_close(server.keyboard_focus.xdg_toplevel)
+        if server.focused_view is not None:
+            lib.wlr_xdg_toplevel_send_close(server.focused_view.xdg_toplevel)
         return True
     if shift and sym in (keysym("e"), keysym("E")):
         server.stop = True
@@ -387,13 +390,13 @@ def handle_keybinding(server: Server, mods: int, sym: int) -> bool:
     return False
 
 
-def cycle_focus(server: Server) -> None:
-    if len(server.windows) < 2:
+def xdg_view_cycle_focus(server: Server) -> None:
+    if len(server.views) < 2:
         return
-    # server.windows is MRU-sorted (focus_window appends), so [0] is LRU.
-    nxt = server.windows[0]
-    raise_window(server, nxt)
-    focus_window(server, nxt, nxt.surface)
+    # server.views is MRU-sorted (xdg_view_focus appends), so [0] is LRU.
+    nxt = server.views[0]
+    xdg_view_raise(server, nxt)
+    xdg_view_focus(server, nxt, nxt.surface)
 
 
 def on_keyboard_destroy(server: Server, keyboard: Keyboard, _data) -> None:
@@ -483,17 +486,17 @@ def process_cursor_motion(server: Server, time_msec: int) -> None:
         x = int(cx - grab.grab_dx)
         y = int(cy - grab.grab_dy)
         lib.wlr_scene_node_set_position(
-            ffi.addressof(grab.window.scene_tree.node), x, y)
-        grab.window.geometry.x = x
-        grab.window.geometry.y = y
+            ffi.addressof(grab.view.scene_tree.node), x, y)
+        grab.view.geometry.x = x
+        grab.view.geometry.y = y
         return
     if server.resize_grab is not None:
         grab = server.resize_grab
         w = max(40, int(grab.start_w + (cx - grab.start_cx)))
         h = max(20, int(grab.start_h + (cy - grab.start_cy)))
-        lib.wlr_xdg_toplevel_set_size(grab.window.xdg_toplevel, w, h)
-        grab.window.geometry.width = w
-        grab.window.geometry.height = h
+        lib.wlr_xdg_toplevel_set_size(grab.view.xdg_toplevel, w, h)
+        grab.view.geometry.width = w
+        grab.view.geometry.height = h
         return
 
     hit = surface_at(server, cx, cy)
@@ -502,7 +505,7 @@ def process_cursor_motion(server: Server, time_msec: int) -> None:
             server.cursor.wlr_cursor, server.cursor.xcursor_mgr, b"default")
         lib.wlr_seat_pointer_clear_focus(server.seat)
         return
-    _window, surface, sx, sy = hit
+    _view, surface, sx, sy = hit
     lib.wlr_seat_pointer_notify_enter(server.seat, surface, sx, sy)
     lib.wlr_seat_pointer_notify_motion(server.seat, time_msec, sx, sy)
 
@@ -522,17 +525,17 @@ def handle_cursor_button(server: Server, data) -> None:
             server.cursor.wlr_cursor.x,
             server.cursor.wlr_cursor.y)
         if hit is not None:
-            window, surface, _sx, _sy = hit
+            view, surface, _sx, _sy = hit
             if (mods & lib.WLR_MODIFIER_ALT) and button == lib.BTN_LEFT:
-                start_move_grab(server, window)
+                xdg_view_start_move_grab(server, view)
                 return
             if (mods & lib.WLR_MODIFIER_ALT) and button == lib.BTN_RIGHT:
-                start_resize_grab(server, window)
+                xdg_view_start_resize_grab(server, view)
                 return
-            raise_window(server, window)
-            focus_window(server, window, surface)
+            xdg_view_raise(server, view)
+            xdg_view_focus(server, view, surface)
         else:
-            clear_keyboard_focus(server)
+            xdg_view_clear_focus(server)
     elif server.move_grab is not None or server.resize_grab is not None:
         server.move_grab = None
         server.resize_grab = None
@@ -543,7 +546,7 @@ def handle_cursor_button(server: Server, data) -> None:
 
 
 def surface_at(server: Server, lx, ly):
-    """Return (window, surface, sx, sy), or None if there is no hit."""
+    """Return (view, surface, sx, sy), or None if there is no hit."""
     sx = ffi.new("double *")
     sy = ffi.new("double *")
     node = lib.wlr_scene_node_at(
@@ -563,117 +566,160 @@ def surface_at(server: Server, lx, ly):
     if tree == ffi.NULL:
         return None
 
-    window = ffi.from_handle(tree.node.data)
-    if window not in server.windows:
+    view = ffi.from_handle(tree.node.data)
+    if view not in server.views:
         return None
-    return window, ss.surface, sx[0], sy[0]
+    return view, ss.surface, sx[0], sy[0]
 
 
-def on_window_new(server: Server, data) -> Window:
+def xdg_view_on_new(server: Server, data) -> XdgView:
     xdg_toplevel = ffi.cast("struct wlr_xdg_toplevel *", data)
     base = xdg_toplevel.base
     scene_tree = lib.wlr_scene_xdg_surface_create(
         ffi.addressof(server.scene.tree), base)
     surface = base.surface
 
-    window = Window(
-        xdg_toplevel, scene_tree, surface,
-        server.primary_output, Rect(0, 0, 0, 0),
+    view = XdgView(
+        scene_tree=scene_tree,
+        surface=surface,
+        geometry=Rect(0, 0, 0, 0),
+        xdg_toplevel=xdg_toplevel,
     )
-    window.handle = ffi.new_handle(window)
-    scene_tree.node.data = window.handle
+    view.handle = ffi.new_handle(view)
+    scene_tree.node.data = view.handle
     # Used by popups to find their parent's scene tree.
     base.data = ffi.cast("void *", scene_tree)
 
-    window.listeners = [
+    view.listeners = [
         listen(
             lib.pywl_surface_commit(surface),
-            lambda data: on_window_commit(server, window, data)),
+            lambda data: xdg_view_on_commit(server, view, data)),
         listen(
             lib.pywl_surface_map(surface),
-            lambda data: on_window_map(server, window, data)),
+            lambda data: xdg_view_on_map(server, view, data)),
         listen(
             lib.pywl_surface_unmap(surface),
-            lambda data: on_window_unmap(server, window, data)),
+            lambda data: xdg_view_on_unmap(server, view, data)),
         listen(
             lib.pywl_xdg_toplevel_destroy(xdg_toplevel),
-            lambda data: on_window_destroy(server, window, data)),
+            lambda data: xdg_view_on_destroy(server, view, data)),
     ]
 
-    return window
+    return view
 
 
-def on_window_destroy(server: Server, window: Window, _data) -> None:
-    """Called when an app closes one of its windows."""
-    for listener in window.listeners:
+def xdg_view_on_destroy(server: Server, view: XdgView, _data) -> None:
+    """Called when an app closes one of its views."""
+    for listener in view.listeners:
         listener.remove()
-    # In case the window is destroyed without an unmap firing first.
-    detach_window(server, window)
+    # In case the view is destroyed without an unmap firing first.
+    xdg_view_detach(server, view)
 
 
-def on_window_unmap(server: Server, window: Window, _data) -> None:
-    """Called when a window becomes hidden (but not destroyed)."""
-    detach_window(server, window)
+def xdg_view_on_unmap(server: Server, view: XdgView, _data) -> None:
+    """Called when a view becomes hidden (but not destroyed)."""
+    xdg_view_detach(server, view)
 
 
-def detach_window(server: Server, window: Window) -> None:
-    was_focused = server.keyboard_focus is window
-    if window in server.windows:
-        server.windows.remove(window)
+def xdg_view_detach(server: Server, view: XdgView) -> None:
+    was_focused = server.focused_view is view
+    if view in server.views:
+        server.views.remove(view)
     if was_focused:
-        if server.windows:
-            successor = server.windows[-1]  # most-recently-focused survivor
-            raise_window(server, successor)
-            focus_window(server, successor, successor.surface)
+        if server.views:
+            successor = server.views[-1]  # most-recently-focused survivor
+            xdg_view_raise(server, successor)
+            xdg_view_focus(server, successor, successor.surface)
         else:
-            clear_keyboard_focus(server)
-    if server.move_grab is not None and server.move_grab.window is window:
+            xdg_view_clear_focus(server)
+    if server.move_grab is not None and server.move_grab.view is view:
         server.move_grab = None
-    if server.resize_grab is not None and server.resize_grab.window is window:
+    if server.resize_grab is not None and server.resize_grab.view is view:
         server.resize_grab = None
 
 
-def on_window_commit(server: Server, window: Window, _data) -> None:
-    """Called whenever an app updates a window."""
-    base = window.xdg_toplevel.base
+def xdg_view_on_commit(server: Server, view: XdgView, _data) -> None:
+    """Called whenever an app updates a view."""
+    base = view.xdg_toplevel.base
     if not base.initial_commit:
-        apply_window_clip(window)
+        xdg_view_apply_clip(view)
         return
 
-    out = current_output_ptr(server)
-    if out != ffi.NULL:
+    output = server.primary_output
+    if output is not None:
+        out = output.wlr_output
         ow = out.width
         oh = out.height
         w, h = int(ow * 0.8), int(oh * 0.8)
         geometry = Rect((ow - w) // 2, (oh - h) // 2, w, h)
         lib.wlr_xdg_toplevel_set_size(
-            window.xdg_toplevel, geometry.width, geometry.height)
+            view.xdg_toplevel, geometry.width, geometry.height)
         lib.wlr_scene_node_set_position(
-            ffi.addressof(window.scene_tree.node),
+            ffi.addressof(view.scene_tree.node),
             geometry.x, geometry.y)
     else:
         geometry = Rect(0, 0, 0, 0)
-        lib.wlr_xdg_toplevel_set_size(window.xdg_toplevel, 0, 0)
+        lib.wlr_xdg_toplevel_set_size(view.xdg_toplevel, 0, 0)
 
-    window.geometry = geometry
-    window.output = server.primary_output
-    apply_window_clip(window)
+    view.geometry = geometry
+    xdg_view_apply_clip(view)
 
 
-def apply_window_clip(window: Window) -> None:
+def xdg_view_apply_clip(view: XdgView) -> None:
     clip = ffi.new("struct wlr_box *")
-    clip.x = window.xdg_toplevel.base.geometry.x
-    clip.y = window.xdg_toplevel.base.geometry.y
-    clip.width = window.geometry.width
-    clip.height = window.geometry.height
+    clip.x = view.xdg_toplevel.base.geometry.x
+    clip.y = view.xdg_toplevel.base.geometry.y
+    clip.width = view.geometry.width
+    clip.height = view.geometry.height
     lib.wlr_scene_subsurface_tree_set_clip(
-        ffi.addressof(window.scene_tree.node), clip)
+        ffi.addressof(view.scene_tree.node), clip)
 
 
-def on_window_map(server: Server, window: Window, _data) -> None:
-    """Called the moment a window first has pixels to show on screen."""
-    server.windows.append(window)
-    focus_window(server, window, window.surface)
+def xdg_view_on_map(server: Server, view: XdgView, _data) -> None:
+    """Called the moment a view first has pixels to show on screen."""
+    server.views.append(view)
+    xdg_view_focus(server, view, view.surface)
+
+
+def xdg_view_focus(server: Server, view: XdgView, surface) -> None:
+    # Move to end of server.views so it's the MRU; xdg_view_detach and
+    # xdg_view_cycle_focus rely on this ordering.
+    if server.views and server.views[-1] is not view:
+        server.views.remove(view)
+        server.views.append(view)
+    lib.wlr_seat_keyboard_notify_enter(
+        server.seat, surface, ffi.NULL, 0, ffi.NULL)
+    for w in server.views:
+        lib.wlr_xdg_toplevel_set_activated(w.xdg_toplevel, w is view)
+    server.focused_view = view
+
+
+def xdg_view_clear_focus(server: Server) -> None:
+    lib.wlr_seat_keyboard_clear_focus(server.seat)
+    for view in server.views:
+        lib.wlr_xdg_toplevel_set_activated(view.xdg_toplevel, False)
+    server.focused_view = None
+
+
+def xdg_view_start_move_grab(server: Server, view: XdgView) -> None:
+    node = view.scene_tree.node
+    gx = server.cursor.wlr_cursor.x - node.x
+    gy = server.cursor.wlr_cursor.y - node.y
+    server.move_grab = MoveGrab(view, gx, gy)
+
+
+def xdg_view_start_resize_grab(server: Server, view: XdgView) -> None:
+    server.resize_grab = ResizeGrab(
+        view,
+        server.cursor.wlr_cursor.x,
+        server.cursor.wlr_cursor.y,
+        view.geometry.width,
+        view.geometry.height,
+    )
+
+
+def xdg_view_raise(server: Server, view: XdgView) -> None:
+    lib.wlr_scene_node_raise_to_top(ffi.addressof(view.scene_tree.node))
 
 
 def on_popup_new(server: Server, data) -> None:
@@ -714,56 +760,6 @@ def on_popup_destroy(server: Server, popup: Popup, _data) -> None:
 def on_seat_request_set_selection(server: Server, data) -> None:
     ev = ffi.cast("struct wlr_seat_request_set_selection_event *", data)
     lib.wlr_seat_set_selection(server.seat, ev.source, ev.serial)
-
-
-def current_output_ptr(server: Server):
-    output = server.primary_output
-    return output.wlr_output if output is not None else ffi.NULL
-
-
-def focus_surface(server: Server, surface) -> None:
-    lib.wlr_seat_keyboard_notify_enter(
-        server.seat, surface, ffi.NULL, 0, ffi.NULL)
-
-
-def focus_window(server: Server, window: Window, surface) -> None:
-    # Move to end of server.windows so it's the MRU; detach_window and
-    # cycle_focus rely on this ordering.
-    if server.windows and server.windows[-1] is not window:
-        server.windows.remove(window)
-        server.windows.append(window)
-    focus_surface(server, surface)
-    for w in server.windows:
-        lib.wlr_xdg_toplevel_set_activated(w.xdg_toplevel, w is window)
-    server.keyboard_focus = window
-
-
-def clear_keyboard_focus(server: Server) -> None:
-    lib.wlr_seat_keyboard_clear_focus(server.seat)
-    for window in server.windows:
-        lib.wlr_xdg_toplevel_set_activated(window.xdg_toplevel, False)
-    server.keyboard_focus = None
-
-
-def start_move_grab(server: Server, window: Window) -> None:
-    node = window.scene_tree.node
-    gx = server.cursor.wlr_cursor.x - node.x
-    gy = server.cursor.wlr_cursor.y - node.y
-    server.move_grab = MoveGrab(window, gx, gy)
-
-
-def start_resize_grab(server: Server, window: Window) -> None:
-    server.resize_grab = ResizeGrab(
-        window,
-        server.cursor.wlr_cursor.x,
-        server.cursor.wlr_cursor.y,
-        window.geometry.width,
-        window.geometry.height,
-    )
-
-
-def raise_window(server: Server, window: Window) -> None:
-    lib.wlr_scene_node_raise_to_top(ffi.addressof(window.scene_tree.node))
 
 
 if __name__ == "__main__":
