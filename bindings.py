@@ -67,11 +67,15 @@ struct wlr_keyboard_modifiers { ...; };
 // partial decls: cffi asks the C compiler for offsets at build time, so
 // these are not locked to a specific wlroots ABI — only to the existence
 // and types of the fields listed here.
-struct wlr_output { int width; int height; ...; };
+struct wlr_output { int width; int height; bool enabled; char *name; ...; };
 struct wlr_cursor { double x; double y; ...; };
 struct wlr_input_device { int type; ...; };
+struct wlr_surface { bool mapped; void *data; ...; };
 struct wlr_keyboard {
     struct wlr_keyboard_modifiers modifiers;
+    struct xkb_keymap *keymap;
+    uint32_t keycodes[...];
+    size_t num_keycodes;
     ...;
 };
 struct wlr_box {
@@ -92,14 +96,39 @@ struct wlr_scene_node {
 struct wlr_scene_tree { struct wlr_scene_node node; ...; };
 struct wlr_scene { struct wlr_scene_tree tree; ...; };
 struct wlr_scene_surface { struct wlr_surface *surface; ...; };
+struct wlr_xdg_surface_state {
+    uint32_t configure_serial;
+    ...;
+};
 struct wlr_xdg_surface {
     struct wlr_surface *surface;
     bool initial_commit;
+    bool initialized;
     struct wlr_box geometry;
+    struct wlr_xdg_surface_state current;
     void *data;
     ...;
 };
-struct wlr_xdg_toplevel { struct wlr_xdg_surface *base; ...; };
+struct wlr_xdg_toplevel_requested {
+    bool maximized;
+    bool fullscreen;
+    bool minimized;
+    ...;
+};
+struct wlr_xdg_toplevel_state {
+    int32_t width;
+    int32_t height;
+    ...;
+};
+struct wlr_xdg_toplevel {
+    struct wlr_xdg_surface *base;
+    struct wlr_xdg_toplevel *parent;
+    char *title;
+    char *app_id;
+    struct wlr_xdg_toplevel_requested requested;
+    struct wlr_xdg_toplevel_state current;
+    ...;
+};
 struct wlr_xdg_popup {
     struct wlr_xdg_surface *base;
     struct wlr_surface *parent;
@@ -108,6 +137,16 @@ struct wlr_xdg_popup {
 struct wlr_data_source;
 struct wlr_seat_request_set_selection_event {
     struct wlr_data_source *source;
+    uint32_t serial;
+    ...;
+};
+
+struct wlr_seat_client;
+struct wlr_seat_pointer_request_set_cursor_event {
+    struct wlr_seat_client *seat_client;
+    struct wlr_surface *surface;
+    int32_t hotspot_x;
+    int32_t hotspot_y;
     uint32_t serial;
     ...;
 };
@@ -138,7 +177,9 @@ void wlr_backend_destroy(struct wlr_backend *);
 
 struct wlr_renderer *wlr_renderer_autocreate(struct wlr_backend *);
 bool wlr_renderer_init_wl_display(struct wlr_renderer *, struct wl_display *);
+bool wlr_renderer_init_wl_shm(struct wlr_renderer *, struct wl_display *);
 void wlr_renderer_destroy(struct wlr_renderer *);
+void wlr_compositor_set_renderer(struct wlr_compositor *, struct wlr_renderer *);
 
 struct wlr_allocator *wlr_allocator_autocreate(
         struct wlr_backend *, struct wlr_renderer *);
@@ -154,6 +195,9 @@ struct wlr_data_device_manager *wlr_data_device_manager_create(
 struct wlr_output_layout *wlr_output_layout_create(struct wl_display *);
 struct wlr_output_layout_output *wlr_output_layout_add_auto(
         struct wlr_output_layout *, struct wlr_output *);
+void wlr_output_layout_remove(struct wlr_output_layout *, struct wlr_output *);
+void wlr_output_layout_get_box(struct wlr_output_layout *,
+        struct wlr_output *, struct wlr_box *dest);
 
 struct wlr_output_state;
 struct wlr_output_mode;
@@ -167,6 +211,15 @@ bool wlr_output_commit_state(
         struct wlr_output *, const struct wlr_output_state *);
 
 struct wlr_scene *wlr_scene_create(void);
+struct wlr_scene_rect;
+struct wlr_scene_tree *wlr_scene_tree_create(struct wlr_scene_tree *parent);
+struct wlr_scene_rect *wlr_scene_rect_create(struct wlr_scene_tree *parent,
+        int width, int height, const float color[4]);
+void wlr_scene_rect_set_size(struct wlr_scene_rect *, int width, int height);
+void wlr_scene_rect_set_color(struct wlr_scene_rect *, const float color[4]);
+void wlr_scene_node_set_enabled(struct wlr_scene_node *, bool enabled);
+void wlr_scene_node_place_below(
+        struct wlr_scene_node *, struct wlr_scene_node *sibling);
 struct wlr_scene_output_layout *wlr_scene_attach_output_layout(
         struct wlr_scene *, struct wlr_output_layout *);
 struct wlr_scene_output *wlr_scene_output_create(
@@ -183,8 +236,13 @@ void wlr_scene_subsurface_tree_set_clip(
 
 struct wlr_xdg_shell *wlr_xdg_shell_create(
         struct wl_display *, uint32_t version);
-void wlr_xdg_toplevel_set_size(struct wlr_xdg_toplevel *, int32_t, int32_t);
+uint32_t wlr_xdg_toplevel_set_size(struct wlr_xdg_toplevel *, int32_t, int32_t);
 uint32_t wlr_xdg_toplevel_set_activated(struct wlr_xdg_toplevel *, bool activated);
+uint32_t wlr_xdg_toplevel_set_fullscreen(struct wlr_xdg_toplevel *, bool);
+uint32_t wlr_xdg_toplevel_set_maximized(struct wlr_xdg_toplevel *, bool);
+uint32_t wlr_xdg_toplevel_set_tiled(struct wlr_xdg_toplevel *, uint32_t edges);
+void wlr_xdg_toplevel_set_bounds(struct wlr_xdg_toplevel *, int32_t w, int32_t h);
+void wlr_xdg_toplevel_set_wm_capabilities(struct wlr_xdg_toplevel *, uint32_t caps);
 void wlr_xdg_toplevel_send_close(struct wlr_xdg_toplevel *);
 struct wlr_xdg_surface *wlr_xdg_surface_try_from_wlr_surface(struct wlr_surface *);
 void wlr_xdg_surface_schedule_configure(struct wlr_xdg_surface *);
@@ -211,6 +269,12 @@ void wlr_keyboard_set_repeat_info(
 uint32_t wlr_keyboard_get_modifiers(struct wlr_keyboard *);
 struct wlr_keyboard *wlr_seat_get_keyboard(struct wlr_seat *);
 void wlr_seat_keyboard_clear_focus(struct wlr_seat *);
+
+struct wlr_keyboard_group;
+struct wlr_keyboard_group *wlr_keyboard_group_create(void);
+void wlr_keyboard_group_destroy(struct wlr_keyboard_group *);
+bool wlr_keyboard_group_add_keyboard(struct wlr_keyboard_group *,
+        struct wlr_keyboard *);
 
 // Cursor / pointer
 struct wlr_xcursor_manager;
@@ -255,6 +319,8 @@ void wlr_cursor_warp_absolute(struct wlr_cursor *, struct wlr_input_device *,
         double x, double y);
 void wlr_cursor_set_xcursor(struct wlr_cursor *,
         struct wlr_xcursor_manager *, const char *);
+void wlr_cursor_set_surface(struct wlr_cursor *,
+        struct wlr_surface *, int32_t hotspot_x, int32_t hotspot_y);
 
 struct wlr_xcursor_manager *wlr_xcursor_manager_create(
         const char *name, uint32_t size);
@@ -274,11 +340,20 @@ void wlr_seat_pointer_notify_frame(struct wlr_seat *);
 void wlr_seat_pointer_clear_focus(struct wlr_seat *);
 
 void wlr_scene_node_raise_to_top(struct wlr_scene_node *);
+void wlr_scene_node_reparent(
+        struct wlr_scene_node *, struct wlr_scene_tree *new_parent);
 
 struct xkb_context *xkb_context_new(int flags);
 void xkb_context_unref(struct xkb_context *);
+struct xkb_rule_names {
+    const char *rules;
+    const char *model;
+    const char *layout;
+    const char *variant;
+    const char *options;
+};
 struct xkb_keymap *xkb_keymap_new_from_names(struct xkb_context *,
-        const void *names, int flags);
+        const struct xkb_rule_names *names, int flags);
 void xkb_keymap_unref(struct xkb_keymap *);
 
 void wlr_scene_output_send_frame_done(struct wlr_scene_output *,
@@ -301,6 +376,79 @@ void wlr_log_init(int verbosity, void *callback);
 // enum wlr_keyboard_modifier
 #define WLR_MODIFIER_ALT ...
 #define WLR_MODIFIER_SHIFT ...
+#define WLR_MODIFIER_CTRL ...
+#define WLR_MODIFIER_LOGO ...
+
+// xdg-toplevel WM capability bits
+#define WLR_XDG_TOPLEVEL_WM_CAPABILITIES_FULLSCREEN ...
+
+// xdg-toplevel resize edge bits
+#define WLR_EDGE_NONE ...
+#define WLR_EDGE_TOP ...
+#define WLR_EDGE_BOTTOM ...
+#define WLR_EDGE_LEFT ...
+#define WLR_EDGE_RIGHT ...
+
+// layer-shell
+#define ZWLR_LAYER_SHELL_V1_LAYER_BACKGROUND ...
+#define ZWLR_LAYER_SHELL_V1_LAYER_BOTTOM ...
+#define ZWLR_LAYER_SHELL_V1_LAYER_TOP ...
+#define ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY ...
+#define ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_NONE ...
+struct wlr_layer_shell_v1;
+struct wlr_layer_surface_v1_state {
+    uint32_t committed;
+    uint32_t anchor;
+    int32_t exclusive_zone;
+    uint32_t keyboard_interactive;
+    uint32_t desired_width, desired_height;
+    uint32_t layer;
+    ...;
+};
+struct wlr_layer_surface_v1 {
+    struct wlr_surface *surface;
+    struct wlr_output *output;
+    char *namespace;
+    bool initialized;
+    bool initial_commit;
+    struct wlr_layer_surface_v1_state current, pending;
+    ...;
+};
+struct wlr_scene_layer_surface_v1 {
+    struct wlr_scene_tree *tree;
+    struct wlr_layer_surface_v1 *layer_surface;
+    ...;
+};
+struct wlr_layer_shell_v1 *wlr_layer_shell_v1_create(
+    struct wl_display *, uint32_t version);
+void wlr_layer_surface_v1_destroy(struct wlr_layer_surface_v1 *);
+struct wlr_scene_layer_surface_v1 *wlr_scene_layer_surface_v1_create(
+    struct wlr_scene_tree *, struct wlr_layer_surface_v1 *);
+void wlr_scene_layer_surface_v1_configure(
+    struct wlr_scene_layer_surface_v1 *,
+    const struct wlr_box *full_area, struct wlr_box *usable_area);
+void wlr_surface_send_enter(struct wlr_surface *, struct wlr_output *);
+
+// xdg-decoration
+#define WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE ...
+struct wlr_xdg_decoration_manager_v1;
+struct wlr_xdg_toplevel_decoration_v1 {
+    struct wlr_xdg_toplevel *toplevel;
+    ...;
+};
+struct wlr_xdg_decoration_manager_v1 *wlr_xdg_decoration_manager_v1_create(
+        struct wl_display *);
+uint32_t wlr_xdg_toplevel_decoration_v1_set_mode(
+        struct wlr_xdg_toplevel_decoration_v1 *, uint32_t mode);
+
+// server-decoration (predecessor to xdg-decoration; obsolete but still used
+// by some clients)
+#define WLR_SERVER_DECORATION_MANAGER_MODE_SERVER ...
+struct wlr_server_decoration_manager;
+struct wlr_server_decoration_manager *wlr_server_decoration_manager_create(
+        struct wl_display *);
+void wlr_server_decoration_manager_set_default_mode(
+        struct wlr_server_decoration_manager *, uint32_t default_mode);
 
 // Resolve a key name (e.g. "Return") to an xkb keysym, or 0 if unknown.
 uint32_t xkb_keysym_from_name(const char *name, int flags);
@@ -311,6 +459,7 @@ uint32_t pywl_keyboard_keysym(struct wlr_keyboard *kb, uint32_t keycode);
 // linux/input-event-codes.h
 #define BTN_LEFT ...
 #define BTN_RIGHT ...
+#define BTN_MIDDLE ...
 
 // our helpers
 void pywl_signal_add(struct wl_signal *, struct wl_listener *);
@@ -327,10 +476,30 @@ struct wlr_output_state *pywl_output_state_new(void);
 void pywl_output_state_free(struct wlr_output_state *);
 
 struct wl_signal *pywl_xdg_toplevel_destroy(struct wlr_xdg_toplevel *);
+struct wl_signal *pywl_xdg_toplevel_set_title(struct wlr_xdg_toplevel *);
+struct wl_signal *pywl_xdg_toplevel_request_maximize(struct wlr_xdg_toplevel *);
 struct wl_signal *pywl_xdg_shell_new_popup(struct wlr_xdg_shell *);
 struct wl_signal *pywl_xdg_popup_destroy(struct wlr_xdg_popup *);
 struct wl_signal *pywl_surface_unmap(struct wlr_surface *);
 struct wl_signal *pywl_seat_request_set_selection(struct wlr_seat *);
+struct wl_signal *pywl_seat_request_set_cursor(struct wlr_seat *);
+struct wl_signal *pywl_seat_request_set_primary_selection(struct wlr_seat *);
+struct wlr_seat_client *pywl_seat_pointer_focused_client(struct wlr_seat *);
+struct wlr_surface *pywl_seat_keyboard_focused_surface(struct wlr_seat *);
+struct wl_signal *pywl_renderer_lost_signal(struct wlr_renderer *);
+struct wlr_keyboard *pywl_keyboard_group_keyboard(struct wlr_keyboard_group *);
+struct wlr_scene_node *pywl_scene_rect_node(struct wlr_scene_rect *);
+struct wl_signal *pywl_xdg_toplevel_request_fullscreen(struct wlr_xdg_toplevel *);
+struct wl_signal *pywl_xdg_toplevel_set_app_id(struct wlr_xdg_toplevel *);
+struct wl_signal *pywl_output_layout_change(struct wlr_output_layout *);
+struct wl_signal *pywl_xdg_decoration_manager_new(
+        struct wlr_xdg_decoration_manager_v1 *);
+struct wl_signal *pywl_xdg_decoration_request_mode(
+        struct wlr_xdg_toplevel_decoration_v1 *);
+struct wl_signal *pywl_xdg_decoration_destroy(
+        struct wlr_xdg_toplevel_decoration_v1 *);
+struct wl_signal *pywl_layer_shell_new_surface(struct wlr_layer_shell_v1 *);
+struct wl_signal *pywl_layer_surface_destroy(struct wlr_layer_surface_v1 *);
 
 struct wlr_output_event_request_state {
     const struct wlr_output_state *state;
@@ -384,9 +553,13 @@ SOURCE = r"""
 #include <wlr/types/wlr_subcompositor.h>
 #include <wlr/types/wlr_input_device.h>
 #include <wlr/types/wlr_keyboard.h>
+#include <wlr/types/wlr_keyboard_group.h>
 #include <wlr/types/wlr_pointer.h>
 #include <wlr/types/wlr_cursor.h>
 #include <wlr/types/wlr_xcursor_manager.h>
+#include <wlr/types/wlr_layer_shell_v1.h>
+#include <wlr/types/wlr_xdg_decoration_v1.h>
+#include <wlr/types/wlr_server_decoration.h>
 #include <wlr/types/wlr_xdg_shell.h>
 #include <wlr/util/box.h>
 #include <wlr/util/log.h>
@@ -397,9 +570,14 @@ void pywl_signal_add(struct wl_signal *s, struct wl_listener *l) {
 }
 
 uint32_t pywl_keyboard_keysym(struct wlr_keyboard *kb, uint32_t keycode) {
-    const xkb_keysym_t *syms;
+    // Return the unshifted (level-0) keysym for binding lookup. This way
+    // a config entry of "q" matches both `q` and `Shift+q`, and the
+    // explicit Shift bit in the binding's mod mask disambiguates them.
     // wlr_keyboard_key_event.keycode is evdev; xkb expects +8.
-    int n = xkb_state_key_get_syms(kb->xkb_state, keycode + 8, &syms);
+    const xkb_keysym_t *syms;
+    xkb_keycode_t kc = keycode + 8;
+    xkb_layout_index_t layout = xkb_state_key_get_layout(kb->xkb_state, kc);
+    int n = xkb_keymap_key_get_syms_by_level(kb->keymap, kc, layout, 0, &syms);
     return n > 0 ? (uint32_t)syms[0] : 0;
 }
 
@@ -478,6 +656,61 @@ struct wl_signal *pywl_cursor_axis(struct wlr_cursor *c) {
 struct wl_signal *pywl_cursor_frame(struct wlr_cursor *c) {
     return &c->events.frame;
 }
+
+struct wl_signal *pywl_xdg_toplevel_set_title(struct wlr_xdg_toplevel *t) {
+    return &t->events.set_title;
+}
+struct wl_signal *pywl_xdg_toplevel_request_maximize(struct wlr_xdg_toplevel *t) {
+    return &t->events.request_maximize;
+}
+struct wl_signal *pywl_seat_request_set_cursor(struct wlr_seat *s) {
+    return &s->events.request_set_cursor;
+}
+struct wl_signal *pywl_seat_request_set_primary_selection(struct wlr_seat *s) {
+    return &s->events.request_set_primary_selection;
+}
+struct wlr_seat_client *pywl_seat_pointer_focused_client(struct wlr_seat *s) {
+    return s->pointer_state.focused_client;
+}
+struct wlr_surface *pywl_seat_keyboard_focused_surface(struct wlr_seat *s) {
+    return s->keyboard_state.focused_surface;
+}
+struct wl_signal *pywl_renderer_lost_signal(struct wlr_renderer *r) {
+    return &r->events.lost;
+}
+struct wlr_keyboard *pywl_keyboard_group_keyboard(struct wlr_keyboard_group *g) {
+    return &g->keyboard;
+}
+struct wlr_scene_node *pywl_scene_rect_node(struct wlr_scene_rect *r) {
+    return &r->node;
+}
+struct wl_signal *pywl_xdg_toplevel_request_fullscreen(struct wlr_xdg_toplevel *t) {
+    return &t->events.request_fullscreen;
+}
+struct wl_signal *pywl_xdg_toplevel_set_app_id(struct wlr_xdg_toplevel *t) {
+    return &t->events.set_app_id;
+}
+struct wl_signal *pywl_output_layout_change(struct wlr_output_layout *l) {
+    return &l->events.change;
+}
+struct wl_signal *pywl_xdg_decoration_manager_new(
+        struct wlr_xdg_decoration_manager_v1 *m) {
+    return &m->events.new_toplevel_decoration;
+}
+struct wl_signal *pywl_xdg_decoration_request_mode(
+        struct wlr_xdg_toplevel_decoration_v1 *d) {
+    return &d->events.request_mode;
+}
+struct wl_signal *pywl_xdg_decoration_destroy(
+        struct wlr_xdg_toplevel_decoration_v1 *d) {
+    return &d->events.destroy;
+}
+struct wl_signal *pywl_layer_shell_new_surface(struct wlr_layer_shell_v1 *s) {
+    return &s->events.new_surface;
+}
+struct wl_signal *pywl_layer_surface_destroy(struct wlr_layer_surface_v1 *l) {
+    return &l->events.destroy;
+}
 """
 
 
@@ -511,6 +744,15 @@ def _build():
         os.path.join(protocols_dir, "stable/xdg-shell/xdg-shell.xml"),
         os.path.join(build_dir, "xdg-shell-protocol.h"),
     ])
+    wlr_protocols_dir = subprocess.check_output(
+        ["pkg-config", "--variable=pkgdatadir", "wlr-protocols"]
+    ).decode().strip()
+    subprocess.check_call([
+        "wayland-scanner", "server-header",
+        os.path.join(
+            wlr_protocols_dir, "unstable/wlr-layer-shell-unstable-v1.xml"),
+        os.path.join(build_dir, "wlr-layer-shell-unstable-v1-protocol.h"),
+    ])
     include_dirs.append(build_dir)
 
     builder = cffi.FFI()
@@ -534,39 +776,35 @@ def _build():
     return mod.ffi, mod.lib
 
 
-ffi, lib = _build()
+def build():
+    """Compile the cffi extension. Returns (ffi, lib, listen).
+    Call once from main(); module-load itself is side-effect free."""
+    ffi, lib = _build()
 
+    @ffi.def_extern()
+    def _pywl_dispatch(wl_listener, data):
+        entry = listen.listeners.get(int(ffi.cast("uintptr_t", wl_listener)))
+        if entry is not None:
+            entry[1](data)
 
-# --- Listener plumbing -------------------------------------------------------
-# One wl_listener per Python callback, all routed through a single C
-# trampoline that looks up the callable by listener address.
+    def listen(signal, callback):
+        """Register `callback(data)` on `signal`. Returns a handle with a
+        `.remove()` method that detaches the underlying wl_listener.
+        `.remove()` is safe to call more than once."""
+        wl_listener = ffi.new("struct wl_listener *")
+        wl_listener.notify = lib._pywl_dispatch  # pylint: disable=protected-access
+        key = int(ffi.cast("uintptr_t", wl_listener))
+        listen.listeners[key] = (wl_listener, callback)
+        lib.pywl_signal_add(signal, wl_listener)
 
-@ffi.def_extern()
-def _pywl_dispatch(wl_listener, data):
-    entry = listen.listeners.get(int(ffi.cast("uintptr_t", wl_listener)))
-    if entry is not None:
-        entry[1](data)
+        def remove():
+            entry = listen.listeners.pop(key, None)
+            if entry is None:
+                return
+            held, _cb = entry
+            lib.wl_list_remove(ffi.addressof(held[0], "link"))
 
+        return SimpleNamespace(remove=remove)
 
-def listen(signal, callback):
-    """Register `callback(data)` on `signal`. Returns a handle with a
-    `.remove()` method that detaches (and frees) the underlying wl_listener.
-    `.remove()` is safe to call more than once."""
-    wl_listener = ffi.new("struct wl_listener *")
-    wl_listener.notify = lib._pywl_dispatch
-    key = int(ffi.cast("uintptr_t", wl_listener))
-    listen.listeners[key] = (wl_listener, callback)
-    lib.pywl_signal_add(signal, wl_listener)
-
-    def remove():
-        entry = listen.listeners.pop(key, None)
-        if entry is None:
-            return
-        held, _cb = entry
-        lib.wl_list_remove(ffi.addressof(held[0], "link"))
-
-    return SimpleNamespace(remove=remove)
-
-
-# wl_listener -> (wl_listener, callable)
-listen.listeners = {}
+    listen.listeners = {}
+    return ffi, lib, listen

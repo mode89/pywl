@@ -5,5 +5,6 @@ pkgs.mkShell {
     (import ./deps.nix pkgs) ++
     (with pkgs; [
       xpra
+      foot
     ]);
 }
