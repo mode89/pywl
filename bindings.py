@@ -74,6 +74,12 @@ struct wlr_keyboard {
     struct wlr_keyboard_modifiers modifiers;
     ...;
 };
+struct wlr_box {
+    int x;
+    int y;
+    int width;
+    int height;
+};
 struct wlr_scene_tree;
 struct wlr_scene_node {
     int x;
@@ -89,6 +95,7 @@ struct wlr_scene_surface { struct wlr_surface *surface; ...; };
 struct wlr_xdg_surface {
     struct wlr_surface *surface;
     bool initial_commit;
+    struct wlr_box geometry;
     void *data;
     ...;
 };
@@ -171,6 +178,8 @@ struct wlr_scene_output *wlr_scene_get_scene_output(
 bool wlr_scene_output_commit(struct wlr_scene_output *, void *);
 struct wlr_scene_tree *wlr_scene_xdg_surface_create(
         struct wlr_scene_tree *, struct wlr_xdg_surface *);
+void wlr_scene_subsurface_tree_set_clip(
+        struct wlr_scene_node *, struct wlr_box *);
 
 struct wlr_xdg_shell *wlr_xdg_shell_create(
         struct wl_display *, uint32_t version);
@@ -379,6 +388,7 @@ SOURCE = r"""
 #include <wlr/types/wlr_cursor.h>
 #include <wlr/types/wlr_xcursor_manager.h>
 #include <wlr/types/wlr_xdg_shell.h>
+#include <wlr/util/box.h>
 #include <wlr/util/log.h>
 #include <xkbcommon/xkbcommon.h>
 

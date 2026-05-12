@@ -637,6 +637,7 @@ def on_window_commit(server: Server, window: Window, _data) -> None:
     """Called whenever an app updates a window."""
     base = window.xdg_toplevel.base
     if not base.initial_commit:
+        apply_window_clip(window)
         return
 
     out = current_output_ptr(server)
@@ -656,6 +657,17 @@ def on_window_commit(server: Server, window: Window, _data) -> None:
 
     window.geometry = geometry
     window.output = server.primary_output
+    apply_window_clip(window)
+
+
+def apply_window_clip(window: Window) -> None:
+    clip = ffi.new("struct wlr_box *")
+    clip.x = window.xdg_toplevel.base.geometry.x
+    clip.y = window.xdg_toplevel.base.geometry.y
+    clip.width = window.geometry.width
+    clip.height = window.geometry.height
+    lib.wlr_scene_subsurface_tree_set_clip(
+        ffi.addressof(window.scene_tree.node), clip)
 
 
 def on_window_map(server: Server, window: Window, _data) -> None:
