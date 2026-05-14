@@ -102,7 +102,8 @@ def make_server(monitor: wl.Monitor) -> wl.Server:
         output_layout=MagicMock(), scene=MagicMock(), scene_layout=MagicMock(),
         layers={layer: MagicMock() for layer in wl.Layer},
         root_bg=MagicMock(), locked_bg=MagicMock(), drag_icon=MagicMock(),
-        xdg_shell=MagicMock(), seat=MagicMock(), cursor=MagicMock(),
+        xdg_shell=MagicMock(), output_mgr=MagicMock(),
+        seat=MagicMock(), cursor=MagicMock(),
         xcursor_mgr=MagicMock(), keyboard_group=MagicMock(),
     )
     s.monitors.append(monitor)
@@ -698,3 +699,152 @@ def test_activation_unknown_surface():
     wl.on_request_activate(s, SN(surface=object()))
 
     assert a.urgent is False
+
+
+# --- output-management (wlr-randr, kanshi) ---------------------------------
+
+def _quiet_arrange(monkeypatch):
+    """Stub `update_monitors`' side effects so tests focus on the
+    output-management interaction (head creation, set_configuration)."""
+    monkeypatch.setattr(wl, "_refresh_monitor_box", lambda *_a: None)
+    monkeypatch.setattr(wl, "arrange", lambda *_a: None)
+    monkeypatch.setattr(wl, "arrange_layers", lambda *_a: None)
+    monkeypatch.setattr(wl, "print_status", lambda *_a: None)
+
+
+def _fake_head(output=None, **fields) -> object:
+    """Fabricate a config-head-shaped object for the apply/test handler."""
+    custom = SN(width=1920, height=1080, refresh=60_000)
+    for key in ("width", "height", "refresh"):
+        if key in fields:
+            setattr(custom, key, fields.pop(key))
+    state = SN(
+        output=output if output is not None else SN(enabled=True),
+        enabled=True, mode="non-null", custom_mode=custom,
+        x=0, y=0, transform=0, scale=1.0, adaptive_sync_enabled=False,
+    )
+    for key, value in fields.items():
+        setattr(state, key, value)
+    return SN(state=state)
+
+
+def test_update_monitors_advertises_enabled_only(monkeypatch):
+    """Disabled outputs are dropped from the advertised configuration."""
+    _quiet_arrange(monkeypatch)
+    on = make_monitor()
+    on.m = (100, 200, 800, 600)
+    on.wlr_output.enabled = True
+    off = make_monitor()
+    off.wlr_output.enabled = False
+    s = make_server(on)
+    s.monitors.append(off)
+
+    fake_config = MagicMock()
+    wl.lib.wlr_output_configuration_v1_create.return_value = fake_config
+    head = MagicMock()
+    wl.lib.wlr_output_configuration_head_v1_create.return_value = head
+
+    wl.update_monitors(s)
+
+    wl.lib.wlr_output_configuration_head_v1_create.assert_called_once_with(
+        fake_config, on.wlr_output)
+    assert (head.state.x, head.state.y) == (100, 200)
+    wl.lib.wlr_output_manager_v1_set_configuration.assert_called_once_with(
+        s.output_mgr, fake_config)
+
+
+def test_apply_commits_per_head(monkeypatch):
+    """A successful apply commits each head and sends `succeeded`."""
+    output = SN(enabled=True)
+    head = _fake_head(output=output, x=10, y=20)
+    monkeypatch.setattr(wl, "_iter_config_heads", lambda _c: iter([head]))
+    wl.lib.wlr_output_commit_state.return_value = True
+    wl.lib.wlr_output_layout_get.return_value = wl.ffi.NULL
+    s = make_server(make_monitor())
+
+    wl.on_output_mgr_apply_or_test(s, MagicMock(), test=False)
+
+    wl.lib.wlr_output_commit_state.assert_called_once()
+    wl.lib.wlr_output_test_state.assert_not_called()
+    wl.lib.wlr_output_layout_add.assert_called_once_with(
+        s.output_layout, output, 10, 20)
+    wl.lib.wlr_output_configuration_v1_send_succeeded.assert_called_once()
+    wl.lib.wlr_output_configuration_v1_send_failed.assert_not_called()
+    wl.lib.wlr_output_configuration_v1_destroy.assert_called_once()
+
+
+def test_apply_test_only_previews(monkeypatch):
+    """`test=True` previews via `wlr_output_test_state`; nothing is committed
+    and the layout is left untouched."""
+    head = _fake_head()
+    monkeypatch.setattr(wl, "_iter_config_heads", lambda _c: iter([head]))
+    wl.lib.wlr_output_test_state.return_value = True
+    s = make_server(make_monitor())
+
+    wl.on_output_mgr_apply_or_test(s, MagicMock(), test=True)
+
+    wl.lib.wlr_output_test_state.assert_called_once()
+    wl.lib.wlr_output_commit_state.assert_not_called()
+    wl.lib.wlr_output_layout_add.assert_not_called()
+    wl.lib.wlr_output_configuration_v1_send_succeeded.assert_called_once()
+
+
+def test_apply_uses_custom_mode_when_no_named_mode(monkeypatch):
+    """`mode == NULL` means the client gave width/height/refresh directly."""
+    head = _fake_head(
+        mode=wl.ffi.NULL, width=1280, height=720, refresh=59_940)
+    monkeypatch.setattr(wl, "_iter_config_heads", lambda _c: iter([head]))
+    wl.lib.wlr_output_commit_state.return_value = True
+    wl.lib.wlr_output_layout_get.return_value = wl.ffi.NULL
+    s = make_server(make_monitor())
+
+    wl.on_output_mgr_apply_or_test(s, MagicMock(), test=False)
+
+    wl.lib.wlr_output_state_set_mode.assert_not_called()
+    wl.lib.wlr_output_state_set_custom_mode.assert_called_once()
+    _state, w, h, r = wl.lib.wlr_output_state_set_custom_mode.call_args.args
+    assert (w, h, r) == (1280, 720, 59_940)
+
+
+def test_apply_skips_layout_add_when_position_unchanged(monkeypatch):
+    """Re-adding at the same position would mark the output as manually
+    placed; the handler skips that redundant call."""
+    output = SN(enabled=True)
+    head = _fake_head(output=output, x=50, y=60)
+    monkeypatch.setattr(wl, "_iter_config_heads", lambda _c: iter([head]))
+    wl.lib.wlr_output_commit_state.return_value = True
+    wl.lib.wlr_output_layout_get.return_value = SN(x=50, y=60)
+    s = make_server(make_monitor())
+
+    wl.on_output_mgr_apply_or_test(s, MagicMock(), test=False)
+
+    wl.lib.wlr_output_layout_add.assert_not_called()
+
+
+def test_apply_disabled_head_skips_mode(monkeypatch):
+    """A disabled head only flips `enabled`; mode/scale/etc. aren't set."""
+    head = _fake_head(enabled=False)
+    monkeypatch.setattr(wl, "_iter_config_heads", lambda _c: iter([head]))
+    wl.lib.wlr_output_commit_state.return_value = True
+    s = make_server(make_monitor())
+
+    wl.on_output_mgr_apply_or_test(s, MagicMock(), test=False)
+
+    wl.lib.wlr_output_state_set_enabled.assert_called_once()
+    wl.lib.wlr_output_state_set_mode.assert_not_called()
+    wl.lib.wlr_output_state_set_custom_mode.assert_not_called()
+    wl.lib.wlr_output_state_set_scale.assert_not_called()
+
+
+def test_apply_failed_commit_reports_failure(monkeypatch):
+    """If any head's commit fails, the client gets a single `failed`."""
+    monkeypatch.setattr(
+        wl, "_iter_config_heads", lambda _c: iter([_fake_head()]))
+    wl.lib.wlr_output_commit_state.return_value = False
+    s = make_server(make_monitor())
+
+    wl.on_output_mgr_apply_or_test(s, MagicMock(), test=False)
+
+    wl.lib.wlr_output_configuration_v1_send_failed.assert_called_once()
+    wl.lib.wlr_output_configuration_v1_send_succeeded.assert_not_called()
+    wl.lib.wlr_output_configuration_v1_destroy.assert_called_once()

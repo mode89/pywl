@@ -49,7 +49,7 @@ struct wlr_session;
 struct wlr_renderer;
 struct wlr_allocator;
 struct wlr_output_layout;
-struct wlr_output_layout_output;
+struct wlr_output_layout_output { int x, y; ...; };
 struct wlr_scene_output;
 struct wlr_scene_output_layout;
 struct wlr_xdg_shell;
@@ -206,9 +206,22 @@ bool wlr_output_init_render(struct wlr_output *,
 void wlr_output_state_set_enabled(struct wlr_output_state *, bool enabled);
 void wlr_output_state_set_mode(
         struct wlr_output_state *, struct wlr_output_mode *);
+void wlr_output_state_set_custom_mode(
+        struct wlr_output_state *, int32_t width, int32_t height,
+        int32_t refresh);
+void wlr_output_state_set_transform(struct wlr_output_state *, uint32_t);
+void wlr_output_state_set_scale(struct wlr_output_state *, float);
+void wlr_output_state_set_adaptive_sync_enabled(
+        struct wlr_output_state *, bool);
 struct wlr_output_mode *wlr_output_preferred_mode(struct wlr_output *);
 bool wlr_output_commit_state(
         struct wlr_output *, const struct wlr_output_state *);
+bool wlr_output_test_state(
+        struct wlr_output *, const struct wlr_output_state *);
+void wlr_output_layout_add(struct wlr_output_layout *,
+        struct wlr_output *, int x, int y);
+struct wlr_output_layout_output *wlr_output_layout_get(
+        struct wlr_output_layout *, struct wlr_output *);
 
 struct wlr_scene *wlr_scene_create(void);
 struct wlr_scene_rect;
@@ -461,6 +474,48 @@ struct wlr_xdg_output_manager_v1;
 struct wlr_xdg_output_manager_v1 *wlr_xdg_output_manager_v1_create(
         struct wl_display *, struct wlr_output_layout *);
 
+// output-management: clients like wlr-randr / kanshi reconfigure outputs.
+struct wlr_output_head_v1_state {
+    struct wlr_output *output;
+    bool enabled;
+    struct wlr_output_mode *mode;
+    struct { int32_t width; int32_t height; int32_t refresh; } custom_mode;
+    int32_t x, y;
+    uint32_t transform;
+    float scale;
+    bool adaptive_sync_enabled;
+    ...;
+};
+struct wlr_output_configuration_head_v1 {
+    struct wlr_output_head_v1_state state;
+    struct wl_list link;
+    ...;
+};
+struct wlr_output_configuration_v1 {
+    struct wl_list heads;
+    ...;
+};
+struct wlr_output_manager_v1;
+struct wlr_output_manager_v1 *wlr_output_manager_v1_create(struct wl_display *);
+void wlr_output_manager_v1_set_configuration(
+        struct wlr_output_manager_v1 *,
+        struct wlr_output_configuration_v1 *);
+struct wlr_output_configuration_v1 *wlr_output_configuration_v1_create(void);
+struct wlr_output_configuration_head_v1 *
+wlr_output_configuration_head_v1_create(
+        struct wlr_output_configuration_v1 *, struct wlr_output *);
+void wlr_output_configuration_v1_destroy(
+        struct wlr_output_configuration_v1 *);
+void wlr_output_configuration_v1_send_succeeded(
+        struct wlr_output_configuration_v1 *);
+void wlr_output_configuration_v1_send_failed(
+        struct wlr_output_configuration_v1 *);
+struct wl_signal *pywl_output_mgr_apply(struct wlr_output_manager_v1 *);
+struct wl_signal *pywl_output_mgr_test(struct wlr_output_manager_v1 *);
+// wl_container_of for the head list: recovers the head from its link node.
+struct wlr_output_configuration_head_v1 *pywl_config_head_from_link(
+        struct wl_list *link);
+
 // server-decoration (predecessor to xdg-decoration; obsolete but still used
 // by some clients)
 #define WLR_SERVER_DECORATION_MANAGER_MODE_SERVER ...
@@ -581,6 +636,7 @@ SOURCE = r"""
 #include <wlr/types/wlr_xdg_activation_v1.h>
 #include <wlr/types/wlr_xdg_decoration_v1.h>
 #include <wlr/types/wlr_xdg_output_v1.h>
+#include <wlr/types/wlr_output_management_v1.h>
 #include <wlr/types/wlr_server_decoration.h>
 #include <wlr/types/wlr_xdg_shell.h>
 #include <wlr/util/box.h>
@@ -736,6 +792,17 @@ struct wl_signal *pywl_layer_surface_destroy(struct wlr_layer_surface_v1 *l) {
 struct wl_signal *pywl_xdg_activation_request_activate(
         struct wlr_xdg_activation_v1 *a) {
     return &a->events.request_activate;
+}
+struct wl_signal *pywl_output_mgr_apply(struct wlr_output_manager_v1 *m) {
+    return &m->events.apply;
+}
+struct wl_signal *pywl_output_mgr_test(struct wlr_output_manager_v1 *m) {
+    return &m->events.test;
+}
+struct wlr_output_configuration_head_v1 *pywl_config_head_from_link(
+        struct wl_list *l) {
+    struct wlr_output_configuration_head_v1 *head;
+    return wl_container_of(l, head, link);
 }
 """
 

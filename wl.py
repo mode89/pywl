@@ -207,6 +207,7 @@ class Server:  # pylint: disable=too-many-instance-attributes
     locked_bg: object
     drag_icon: object
     xdg_shell: object
+    output_mgr: object
     seat: object
     cursor: object
     xcursor_mgr: object
@@ -488,6 +489,8 @@ def setup() -> Server:  # pylint: disable=too-many-locals,too-many-statements
     scene_layout = lib.wlr_scene_attach_output_layout(scene, output_layout)
     # Per-screen name/description for bars and screenshot tools.
     lib.wlr_xdg_output_manager_v1_create(display, output_layout)
+    # Lets kanshi/wlr-randr query and reconfigure outputs.
+    output_mgr = lib.wlr_output_manager_v1_create(display)
 
     xdg_shell = lib.wlr_xdg_shell_create(display, 6)
     _trace(f"setup: xdg_shell={xdg_shell}")
@@ -518,7 +521,8 @@ def setup() -> Server:  # pylint: disable=too-many-locals,too-many-statements
         renderer=renderer, allocator=allocator, compositor=compositor,
         output_layout=output_layout, scene=scene, scene_layout=scene_layout,
         layers=layers, root_bg=root_bg, locked_bg=locked_bg,
-        drag_icon=drag_icon, xdg_shell=xdg_shell, seat=seat,
+        drag_icon=drag_icon, xdg_shell=xdg_shell, output_mgr=output_mgr,
+        seat=seat,
         cursor=cursor, xcursor_mgr=xcursor_mgr, keyboard_group=ffi.NULL,
     )
     server.keyboard_group = create_keyboard_group(server)
@@ -538,6 +542,10 @@ def setup() -> Server:  # pylint: disable=too-many-locals,too-many-statements
                lambda d: on_new_input(server, d)),
         listen(lib.pywl_output_layout_change(output_layout),
                lambda d: update_monitors(server)),
+        listen(lib.pywl_output_mgr_apply(output_mgr),
+               lambda d: on_output_mgr_apply_or_test(server, d, test=False)),
+        listen(lib.pywl_output_mgr_test(output_mgr),
+               lambda d: on_output_mgr_apply_or_test(server, d, test=True)),
         listen(lib.pywl_xdg_shell_new_toplevel(xdg_shell),
                lambda d: on_new_xdg_toplevel(server, d)),
         listen(lib.pywl_xdg_shell_new_popup(xdg_shell),
@@ -768,12 +776,81 @@ def cleanup_monitor(server: Server, monitor: Monitor) -> None:
 
 
 def update_monitors(server: Server) -> None:
-    """Layout-change hook: refresh every monitor's box and arrange."""
+    """Layout-change hook: refresh every monitor's box, arrange, and
+    advertise the new configuration to output-management clients."""
+    output_config = lib.wlr_output_configuration_v1_create()
     for monitor in server.monitors:
         _refresh_monitor_box(server, monitor)
         arrange_layers(server, monitor)
         arrange(server, monitor)
+        if monitor.wlr_output.enabled:
+            head = lib.wlr_output_configuration_head_v1_create(
+                output_config, monitor.wlr_output)
+            head.state.x, head.state.y = monitor.m[0], monitor.m[1]
+    # set_configuration takes ownership of `output_config`.
+    lib.wlr_output_manager_v1_set_configuration(
+        server.output_mgr, output_config)
     print_status(server)
+
+
+def _iter_config_heads(output_config):
+    """Walk a `wlr_output_configuration_v1`'s head list."""
+    sentinel = ffi.addressof(output_config.heads)
+    link = output_config.heads.next
+    while link != sentinel:
+        yield lib.pywl_config_head_from_link(link)
+        link = link.next
+
+
+def on_output_mgr_apply_or_test(server: Server, data, test: bool) -> None:
+    """A client (wlr-randr, kanshi) asked to change/preview the output
+    setup. Apply head-by-head, then tell the client whether it stuck.
+    Monitor geometry is refreshed by `update_monitors` via the layout's
+    change signal, so we don't update it here."""
+    output_config = ffi.cast("struct wlr_output_configuration_v1 *", data)
+    ok = True
+    for head in _iter_config_heads(output_config):
+        state = head.state
+        wlr_output = state.output
+        output_state = lib.pywl_output_state_new()
+        lib.wlr_output_state_set_enabled(output_state, state.enabled)
+        if state.enabled:
+            if state.mode != ffi.NULL:
+                lib.wlr_output_state_set_mode(output_state, state.mode)
+            else:
+                lib.wlr_output_state_set_custom_mode(
+                    output_state,
+                    state.custom_mode.width,
+                    state.custom_mode.height,
+                    state.custom_mode.refresh)
+            lib.wlr_output_state_set_transform(output_state, state.transform)
+            lib.wlr_output_state_set_scale(output_state, state.scale)
+            lib.wlr_output_state_set_adaptive_sync_enabled(
+                output_state, state.adaptive_sync_enabled)
+        if test:
+            ok = ok and bool(
+                lib.wlr_output_test_state(wlr_output, output_state))
+        else:
+            ok = ok and bool(
+                lib.wlr_output_commit_state(wlr_output, output_state))
+            # Skip layout_add when the position is unchanged; otherwise
+            # wlroots marks the output as manually placed.
+            if wlr_output.enabled:
+                placed = lib.wlr_output_layout_get(
+                    server.output_layout, wlr_output)
+                if (placed == ffi.NULL
+                        or placed.x != state.x or placed.y != state.y):
+                    lib.wlr_output_layout_add(
+                        server.output_layout, wlr_output, state.x, state.y)
+        lib.pywl_output_state_free(output_state)
+    if ok:
+        lib.wlr_output_configuration_v1_send_succeeded(output_config)
+    else:
+        lib.wlr_output_configuration_v1_send_failed(output_config)
+    lib.wlr_output_configuration_v1_destroy(output_config)
+    # Some commits don't change layout-relevant fields and so don't trigger
+    # the layout's change signal; force a refresh. See dwl issue #577.
+    update_monitors(server)
 
 
 def monitor_at(server: Server, x: float, y: float) -> Monitor | None:
