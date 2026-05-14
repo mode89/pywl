@@ -1,9 +1,8 @@
 pkgs: with pkgs; [
-  (python3.withPackages (ps: with ps; [
-    cffi
-    setuptools
-    pytest
-  ]))
+  python3
+  python3Packages.cffi
+  python3Packages.setuptools
+  python3Packages.pytest
   pkg-config
   wlroots_0_19
   wayland

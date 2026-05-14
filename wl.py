@@ -500,6 +500,9 @@ def setup() -> Server:  # pylint: disable=too-many-locals,too-many-statements
     _trace(f"setup: server_decoration_mgr={server_decoration_mgr}")
     layer_shell = lib.wlr_layer_shell_v1_create(display, 3)
     _trace(f"setup: layer_shell={layer_shell}")
+    # Activation requests become urgency hints, not focus steals.
+    activation = lib.wlr_xdg_activation_v1_create(display)
+    _trace(f"setup: activation={activation}")
     seat = lib.wlr_seat_create(display, b"seat0")
     _trace(f"setup: seat={seat}")
 
@@ -523,6 +526,8 @@ def setup() -> Server:  # pylint: disable=too-many-locals,too-many-statements
                lambda d: on_new_layer_surface(server, d)),
         listen(lib.pywl_xdg_decoration_manager_new(xdg_decoration_mgr),
                on_new_xdg_decoration),
+        listen(lib.pywl_xdg_activation_request_activate(activation),
+               lambda d: on_request_activate(server, d)),
         listen(lib.pywl_renderer_lost_signal(renderer),
                lambda d: on_gpu_reset(server, d)),
         listen(lib.pywl_backend_new_output(backend),
@@ -1201,6 +1206,41 @@ def on_new_xdg_decoration(data) -> None:
     ]
     client.listeners.extend(listeners)
     request_decoration_mode(client)
+
+
+def on_request_activate(server: Server, data) -> None:
+    """App or helper asked to foreground a window: flag it urgent so the
+    bar/border can highlight it, but don't steal focus."""
+    event = ffi.cast(
+        "struct wlr_xdg_activation_v1_request_activate_event *", data)
+    client = _client_from_surface(server, event.surface)
+    if client is None or client is top_client(server, server.selected_monitor):
+        return
+    client.urgent = True
+    print_status(server)
+    # Unmapped clients have no border rects to paint.
+    if client.surface.mapped:
+        _set_border_color(client, config.urgent_color)
+
+
+def _client_from_surface(server: Server, surface) -> Client | None:
+    """Find the toplevel client owning `surface`, walking through subsurfaces
+    and popup ancestors. Returns None for surfaces we don't manage (e.g.
+    layer-shell panels)."""
+    if surface == ffi.NULL:
+        return None
+    root = lib.wlr_surface_get_root_surface(surface)
+    while True:
+        toplevel = lib.wlr_xdg_toplevel_try_from_wlr_surface(root)
+        if toplevel != ffi.NULL:
+            return next(
+                (c for c in server.clients if c.xdg_toplevel == toplevel),
+                None)
+        popup = lib.wlr_xdg_popup_try_from_wlr_surface(root)
+        # pylint: disable-next=consider-using-in
+        if popup == ffi.NULL or popup.parent == ffi.NULL:
+            return None
+        root = lib.wlr_surface_get_root_surface(popup.parent)
 
 
 def _initial_float_geometry(

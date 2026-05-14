@@ -245,6 +245,10 @@ void wlr_xdg_toplevel_set_bounds(struct wlr_xdg_toplevel *, int32_t w, int32_t h
 void wlr_xdg_toplevel_set_wm_capabilities(struct wlr_xdg_toplevel *, uint32_t caps);
 void wlr_xdg_toplevel_send_close(struct wlr_xdg_toplevel *);
 struct wlr_xdg_surface *wlr_xdg_surface_try_from_wlr_surface(struct wlr_surface *);
+struct wlr_xdg_toplevel *wlr_xdg_toplevel_try_from_wlr_surface(
+        struct wlr_surface *);
+struct wlr_xdg_popup *wlr_xdg_popup_try_from_wlr_surface(struct wlr_surface *);
+struct wlr_surface *wlr_surface_get_root_surface(struct wlr_surface *);
 void wlr_xdg_surface_schedule_configure(struct wlr_xdg_surface *);
 void wlr_seat_set_selection(struct wlr_seat *,
         struct wlr_data_source *, uint32_t serial);
@@ -441,6 +445,17 @@ struct wlr_xdg_decoration_manager_v1 *wlr_xdg_decoration_manager_v1_create(
 uint32_t wlr_xdg_toplevel_decoration_v1_set_mode(
         struct wlr_xdg_toplevel_decoration_v1 *, uint32_t mode);
 
+// xdg-activation
+struct wlr_xdg_activation_v1;
+struct wlr_xdg_activation_v1_request_activate_event {
+    struct wlr_surface *surface;
+    ...;
+};
+struct wlr_xdg_activation_v1 *wlr_xdg_activation_v1_create(
+        struct wl_display *);
+struct wl_signal *pywl_xdg_activation_request_activate(
+        struct wlr_xdg_activation_v1 *);
+
 // server-decoration (predecessor to xdg-decoration; obsolete but still used
 // by some clients)
 #define WLR_SERVER_DECORATION_MANAGER_MODE_SERVER ...
@@ -558,6 +573,7 @@ SOURCE = r"""
 #include <wlr/types/wlr_cursor.h>
 #include <wlr/types/wlr_xcursor_manager.h>
 #include <wlr/types/wlr_layer_shell_v1.h>
+#include <wlr/types/wlr_xdg_activation_v1.h>
 #include <wlr/types/wlr_xdg_decoration_v1.h>
 #include <wlr/types/wlr_server_decoration.h>
 #include <wlr/types/wlr_xdg_shell.h>
@@ -710,6 +726,10 @@ struct wl_signal *pywl_layer_shell_new_surface(struct wlr_layer_shell_v1 *s) {
 }
 struct wl_signal *pywl_layer_surface_destroy(struct wlr_layer_surface_v1 *l) {
     return &l->events.destroy;
+}
+struct wl_signal *pywl_xdg_activation_request_activate(
+        struct wlr_xdg_activation_v1 *a) {
+    return &a->events.request_activate;
 }
 """
 

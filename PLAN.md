@@ -120,7 +120,7 @@ Without these you can't have a bar, wallpaper, lockscreen, or proper clipboard.
 
 27. [DONE] **`wlr_layer_shell_v1`** — `LayerSurface` dataclass, `arrange_layer` / `arrange_layers`, exclusive zones shrinking the monitor's `w` box, popup tree per layer, keyboard interactivity. Required for `waybar`, `swaybg`, `mako`, `wofi`.
 28. [DONE] **`wlr_xdg_decoration_v1`** + **`wlr_server_decoration`** — request SSD by default; suppresses GTK/Qt CSDs.
-29. **`wlr_xdg_activation_v1`** — focus-request handler; also the urgency source that drives `Client.urgent` from Tier 1 #12.
+29. [DONE] **`wlr_xdg_activation_v1`** — focus-request handler; also the urgency source that drives `Client.urgent` from Tier 1 #12.
 30. **`wlr_xdg_output_v1`** — per-output name/description, driven by `update_monitors` from Tier 1 #20.
 31. **`wlr_output_management_v1`** + apply/test — needed by `kanshi`, `wlr-randr`.
 32. **`wlr_output_power_management_v1`** — DPMS.

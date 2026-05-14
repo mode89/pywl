@@ -7,7 +7,7 @@ subsystem under test and `<scenario>` is 1-2 words for the specific case.
 
 from __future__ import annotations
 
-from types import SimpleNamespace
+from types import SimpleNamespace as SN
 from unittest.mock import MagicMock
 
 import pytest
@@ -22,7 +22,7 @@ def _patch_bindings(monkeypatch):
     lib.pywl_seat_keyboard_focused_surface = MagicMock(return_value=None)
     lib.wlr_xdg_toplevel_set_size.return_value = 42
 
-    monkeypatch.setattr(wl, "ffi", SimpleNamespace(
+    monkeypatch.setattr(wl, "ffi", SN(
         NULL=object(),
         addressof=lambda *_a, **_k: None,
         cast=lambda _t, x: x,
@@ -37,15 +37,15 @@ def _patch_bindings(monkeypatch):
     monkeypatch.setattr(wl, "config", _fake_config)
 
 
-_fake_config = SimpleNamespace(
+_fake_config = SN(
     border_width=3,
     border_color=(0.5, 0.5, 0.5, 1.0),
     focus_color=(1.0, 0.5, 0.0, 1.0),
     urgent_color=(0.8, 0.0, 0.0, 1.0),
     layouts=[
-        SimpleNamespace(name="tile", symbol="[]="),
-        SimpleNamespace(name="floating", symbol="><>"),
-        SimpleNamespace(name="monocle", symbol="[M]"),
+        SN(name="tile", symbol="[]="),
+        SN(name="floating", symbol="><>"),
+        SN(name="monocle", symbol="[M]"),
     ],
     rules=[],
 )
@@ -639,3 +639,62 @@ def test_focus_no_keyboard():
     assert args[2] is wl.ffi.NULL
     assert args[3] == 0
     assert args[4] is wl.ffi.NULL
+
+
+# --- xdg-activation ---------------------------------------------------------
+
+def _wire_surface_lookup(server: wl.Server) -> None:
+    """Make `_client_from_surface` resolve test clients: any surface is its
+    own root, and a surface maps to its client's xdg_toplevel."""
+    wl.lib.wlr_surface_get_root_surface.side_effect = lambda s: s
+
+    def to_toplevel(root):
+        for client in server.clients:
+            if client.surface is root:
+                return client.xdg_toplevel
+        return wl.ffi.NULL
+    wl.lib.wlr_xdg_toplevel_try_from_wlr_surface.side_effect = to_toplevel
+    wl.lib.wlr_xdg_popup_try_from_wlr_surface.return_value = wl.ffi.NULL
+
+
+def test_activation_marks_urgent():
+    """Request on an unfocused client flags it urgent and repaints borders."""
+    m = make_monitor()
+    s = make_server(m)
+    a, b = make_client(m), make_client(m)
+    s.clients.extend([a, b])
+    s.fstack.insert(0, a)  # `a` is focused; `b` is the activation target
+    _wire_surface_lookup(s)
+
+    wl.on_request_activate(s, SN(surface=b.surface))
+
+    assert b.urgent is True
+    assert wl.lib.wlr_scene_rect_set_color.call_count == 4
+
+
+def test_activation_ignores_focused():
+    """A request for the already-focused window is a no-op."""
+    m = make_monitor()
+    s = make_server(m)
+    a = make_client(m)
+    s.clients.append(a)
+    s.fstack.insert(0, a)
+    _wire_surface_lookup(s)
+
+    wl.on_request_activate(s, SN(surface=a.surface))
+
+    assert a.urgent is False
+    assert wl.lib.wlr_scene_rect_set_color.call_count == 0
+
+
+def test_activation_unknown_surface():
+    """A request for a surface we don't track is silently ignored."""
+    m = make_monitor()
+    s = make_server(m)
+    a = make_client(m)
+    s.clients.append(a)
+    _wire_surface_lookup(s)
+
+    wl.on_request_activate(s, SN(surface=object()))
+
+    assert a.urgent is False

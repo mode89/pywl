@@ -6,5 +6,8 @@ pkgs.mkShell {
     (with pkgs; [
       xpra
       foot
+      gtk4
+      gobject-introspection
+      python3Packages.pygobject3
     ]);
 }
