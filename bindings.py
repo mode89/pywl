@@ -456,6 +456,11 @@ struct wlr_xdg_activation_v1 *wlr_xdg_activation_v1_create(
 struct wl_signal *pywl_xdg_activation_request_activate(
         struct wlr_xdg_activation_v1 *);
 
+// xdg-output: per-screen name/description for bars, screenshot tools, etc.
+struct wlr_xdg_output_manager_v1;
+struct wlr_xdg_output_manager_v1 *wlr_xdg_output_manager_v1_create(
+        struct wl_display *, struct wlr_output_layout *);
+
 // server-decoration (predecessor to xdg-decoration; obsolete but still used
 // by some clients)
 #define WLR_SERVER_DECORATION_MANAGER_MODE_SERVER ...
@@ -575,6 +580,7 @@ SOURCE = r"""
 #include <wlr/types/wlr_layer_shell_v1.h>
 #include <wlr/types/wlr_xdg_activation_v1.h>
 #include <wlr/types/wlr_xdg_decoration_v1.h>
+#include <wlr/types/wlr_xdg_output_v1.h>
 #include <wlr/types/wlr_server_decoration.h>
 #include <wlr/types/wlr_xdg_shell.h>
 #include <wlr/util/box.h>

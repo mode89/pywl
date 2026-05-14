@@ -486,6 +486,8 @@ def setup() -> Server:  # pylint: disable=too-many-locals,too-many-statements
 
     output_layout = lib.wlr_output_layout_create(display)
     scene_layout = lib.wlr_scene_attach_output_layout(scene, output_layout)
+    # Per-screen name/description for bars and screenshot tools.
+    lib.wlr_xdg_output_manager_v1_create(display, output_layout)
 
     xdg_shell = lib.wlr_xdg_shell_create(display, 6)
     _trace(f"setup: xdg_shell={xdg_shell}")
