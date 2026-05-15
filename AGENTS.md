@@ -7,6 +7,16 @@ Wayland compositor written in Python on top of wlroots.
 - `tests.py`: unit tests.
 - `vm/`: NixOS VM for headed testing (graphical QEMU window with virtio-gpu).
 
+## dwl Parity
+
+When implementing compositor behavior that dwl already handles, mirror dwl's code flow and state transitions as closely as Python permits. Prefer translating dwl's established concepts into small Python equivalents over inventing new control flow.
+
+- Compare against dwl's source code before changing behavior that dwl also implements.
+- Preserve dwl's ordering of side effects. In wlroots compositors, small ordering changes can create visible client glitches, stale compositor state, or crashes.
+- If intentionally diverging from dwl, document why in code and cover the divergence with a focused test.
+- If you spot an existing discrepancy from dwl while working in related code, report it to the user even if it is outside the requested change. Do not fix unrelated discrepancies unless asked.
+- Avoid Python-side mutation of wlroots-owned state fields when dwl relies on wlroots events/state.
+
 ## Bindings
 
 - `pywl_*` C helpers are plumbing only — static-inline wrappers, alloc/free for opaque-sized structs, accessors for anonymous struct members. For regular named struct fields, declare the struct in the cdef and access from Python directly. Logic stays in Python.
