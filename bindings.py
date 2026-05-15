@@ -519,6 +519,13 @@ void wlr_output_configuration_v1_send_failed(
 struct wl_signal *pywl_output_mgr_apply(struct wlr_output_manager_v1 *);
 struct wl_signal *pywl_output_mgr_test(struct wlr_output_manager_v1 *);
 
+// gamma-control: wlsunset / gammastep set per-output gamma LUTs.
+struct wlr_gamma_control_manager_v1;
+struct wlr_gamma_control_manager_v1 *wlr_gamma_control_manager_v1_create(
+        struct wl_display *);
+void wlr_scene_set_gamma_control_manager_v1(
+        struct wlr_scene *, struct wlr_gamma_control_manager_v1 *);
+
 // output-power-management: DPMS (clients turn screens on/off).
 struct wlr_output_power_v1_set_mode_event {
     struct wlr_output *output;
@@ -658,6 +665,7 @@ SOURCE = r"""
 #include <wlr/types/wlr_xdg_output_v1.h>
 #include <wlr/types/wlr_output_management_v1.h>
 #include <wlr/types/wlr_output_power_management_v1.h>
+#include <wlr/types/wlr_gamma_control_v1.h>
 #include <wlr/types/wlr_server_decoration.h>
 #include <wlr/types/wlr_xdg_shell.h>
 #include <wlr/util/box.h>

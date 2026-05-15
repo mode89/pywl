@@ -124,7 +124,7 @@ Without these you can't have a bar, wallpaper, lockscreen, or proper clipboard.
 30. [DONE] **`wlr_xdg_output_v1`** — per-output name/description, driven by `update_monitors` from Tier 1 #20.
 31. [DONE] **`wlr_output_management_v1`** + apply/test — needed by `kanshi`, `wlr-randr`.
 32. [DONE] **`wlr_output_power_management_v1`** — DPMS.
-33. **`wlr_gamma_control_v1`** — `wlsunset`, `gammastep`; wired via `wlr_scene_set_gamma_control_manager_v1`.
+33. [DONE] **`wlr_gamma_control_v1`** — `wlsunset`, `gammastep`; wired via `wlr_scene_set_gamma_control_manager_v1`.
 34. **`wlr_primary_selection_v1` manager** — middle-click paste. The seat listener was already wired in Tier 0 #7; this item just adds the protocol global.
 35. [DONE] **`wlr_data_control_v1`** + **`wlr_ext_data_control_v1`** — `wl-clipboard`, `cliphist`.
 36. **`wlr_session_lock_v1`** — lock surfaces on `Layer.Block`, enables the `locked_bg` rect created in Tier 0 #4. `swaylock`, `waylock`.

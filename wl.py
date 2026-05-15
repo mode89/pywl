@@ -498,6 +498,9 @@ def setup() -> Server:  # pylint: disable=too-many-locals,too-many-statements
     output_mgr = lib.wlr_output_manager_v1_create(display)
     # DPMS: lets clients (swayidle, wlopm) power screens off and back on.
     output_power_mgr = lib.wlr_output_power_manager_v1_create(display)
+    # Per-screen gamma LUT for wlsunset / gammastep; scene applies it.
+    lib.wlr_scene_set_gamma_control_manager_v1(
+        scene, lib.wlr_gamma_control_manager_v1_create(display))
 
     xdg_shell = lib.wlr_xdg_shell_create(display, 6)
     _trace(f"setup: xdg_shell={xdg_shell}")
