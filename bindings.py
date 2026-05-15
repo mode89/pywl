@@ -58,6 +58,8 @@ struct wlr_seat;
 struct wlr_compositor;
 struct wlr_subcompositor;
 struct wlr_data_device_manager;
+struct wlr_data_control_manager_v1;
+struct wlr_ext_data_control_manager_v1;
 struct xkb_context;
 struct xkb_keymap;
 // wlr_keyboard_modifiers is embedded in wlr_keyboard, so cffi needs a
@@ -191,6 +193,10 @@ struct wlr_compositor *wlr_compositor_create(
 struct wlr_subcompositor *wlr_subcompositor_create(struct wl_display *);
 struct wlr_data_device_manager *wlr_data_device_manager_create(
         struct wl_display *);
+struct wlr_data_control_manager_v1 *wlr_data_control_manager_v1_create(
+        struct wl_display *);
+struct wlr_ext_data_control_manager_v1 *wlr_ext_data_control_manager_v1_create(
+        struct wl_display *, uint32_t version);
 
 struct wlr_output_layout *wlr_output_layout_create(struct wl_display *);
 struct wlr_output_layout_output *wlr_output_layout_add_auto(
@@ -621,6 +627,8 @@ SOURCE = r"""
 #include <wlr/render/wlr_renderer.h>
 #include <wlr/types/wlr_compositor.h>
 #include <wlr/types/wlr_data_device.h>
+#include <wlr/types/wlr_data_control_v1.h>
+#include <wlr/types/wlr_ext_data_control_v1.h>
 #include <wlr/types/wlr_output.h>
 #include <wlr/types/wlr_output_layout.h>
 #include <wlr/types/wlr_scene.h>

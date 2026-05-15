@@ -470,6 +470,10 @@ def setup() -> Server:  # pylint: disable=too-many-locals,too-many-statements
     compositor = lib.wlr_compositor_create(display, 6, renderer)
     lib.wlr_subcompositor_create(display)
     lib.wlr_data_device_manager_create(display)
+    # Lets clipboard managers (wl-clipboard, cliphist) read and set the
+    # seat selection without needing a focused window of their own.
+    lib.wlr_data_control_manager_v1_create(display)
+    lib.wlr_ext_data_control_manager_v1_create(display, 1)
 
     scene = lib.wlr_scene_create()
     scene_tree_ptr = ffi.addressof(scene.tree)
