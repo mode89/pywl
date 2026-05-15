@@ -176,6 +176,7 @@ struct wlr_backend *wlr_backend_autocreate(
         struct wl_event_loop *, struct wlr_session **);
 bool wlr_backend_start(struct wlr_backend *);
 void wlr_backend_destroy(struct wlr_backend *);
+bool wlr_session_change_vt(struct wlr_session *, unsigned vt);
 
 struct wlr_renderer *wlr_renderer_autocreate(struct wlr_backend *);
 bool wlr_renderer_init_wl_display(struct wlr_renderer *, struct wl_display *);
@@ -247,6 +248,7 @@ void wlr_scene_output_layout_add_output(struct wlr_scene_output_layout *,
         struct wlr_output_layout_output *, struct wlr_scene_output *);
 struct wlr_scene_output *wlr_scene_get_scene_output(
         struct wlr_scene *, struct wlr_output *);
+void wlr_scene_output_set_position(struct wlr_scene_output *, int lx, int ly);
 bool wlr_scene_output_commit(struct wlr_scene_output *, void *);
 struct wlr_scene_tree *wlr_scene_xdg_surface_create(
         struct wlr_scene_tree *, struct wlr_xdg_surface *);
@@ -694,6 +696,7 @@ SOURCE = r"""
 #include <linux/input-event-codes.h>
 #include <wayland-server-core.h>
 #include <wlr/backend.h>
+#include <wlr/backend/session.h>
 #include <wlr/render/allocator.h>
 #include <wlr/render/wlr_renderer.h>
 #include <wlr/types/wlr_compositor.h>

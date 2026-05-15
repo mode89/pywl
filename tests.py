@@ -96,6 +96,7 @@ def make_server(monitor: wl.Monitor) -> wl.Server:
     """Build a `Server` with `monitor` as its single (and selected) screen."""
     s = wl.Server(
         display=MagicMock(), loop=MagicMock(), backend=MagicMock(),
+        session=MagicMock(),
         renderer=MagicMock(), allocator=MagicMock(), compositor=MagicMock(),
         output_layout=MagicMock(), scene=MagicMock(), scene_layout=MagicMock(),
         layers={layer: MagicMock() for layer in wl.Layer},
@@ -729,8 +730,8 @@ def _fake_head(output=None, **fields) -> object:
     return SN(state=state)
 
 
-def test_update_monitors_enabled_only(monkeypatch):
-    """Disabled outputs are dropped from the advertised configuration."""
+def test_update_monitors_disabled_removed(monkeypatch):
+    """Disabled outputs leave the layout and are advertised as disabled."""
     _quiet_arrange(monkeypatch)
     on = make_monitor()
     on.m = (100, 200, 800, 600)
@@ -742,16 +743,138 @@ def test_update_monitors_enabled_only(monkeypatch):
 
     fake_config = MagicMock()
     wl.lib.wlr_output_configuration_v1_create.return_value = fake_config
-    head = MagicMock()
-    wl.lib.wlr_output_configuration_head_v1_create.return_value = head
+    on_head, off_head = MagicMock(), MagicMock()
+    wl.lib.wlr_output_configuration_head_v1_create.side_effect = [
+        on_head, off_head]
 
     wl.update_monitors(s)
 
-    wl.lib.wlr_output_configuration_head_v1_create.assert_called_once_with(
-        fake_config, on.wlr_output)
-    assert (head.state.x, head.state.y) == (100, 200)
+    wl.lib.wlr_output_layout_remove.assert_called_once_with(
+        s.output_layout, off.wlr_output)
+    assert off.m == (0, 0, 0, 0)
+    assert off_head.state.enabled is False
+    assert (on_head.state.x, on_head.state.y) == (100, 200)
     wl.lib.wlr_output_manager_v1_set_configuration.assert_called_once_with(
         s.output_mgr, fake_config)
+
+
+def test_update_monitors_readds_enabled(monkeypatch):
+    """An output re-enabled after VT restore is put back in the layout."""
+    _quiet_arrange(monkeypatch)
+    m = make_monitor()
+    m.wlr_output.enabled = True
+    s = make_server(m)
+    wl.lib.wlr_output_layout_get.return_value = wl.ffi.NULL
+
+    wl.update_monitors(s)
+
+    wl.lib.wlr_output_layout_add_auto.assert_called_once_with(
+        s.output_layout, m.wlr_output)
+
+
+def test_update_monitors_adopts_orphans(monkeypatch):
+    """Mapped clients with no screen rejoin layout when a screen returns."""
+    _quiet_arrange(monkeypatch)
+    m = make_monitor()
+    m.wlr_output.enabled = True
+    s = make_server(m)
+    c = make_client(m)
+    c.monitor = None
+    s.clients.append(c)
+    s.fstack.append(c)
+
+    wl.update_monitors(s)
+    wl.action_toggle_fullscreen(s, None)
+
+    assert c.monitor is m
+    assert c.fullscreen is True
+
+
+def test_update_monitors_adopts_after_refresh(monkeypatch):
+    """Orphaned windows are reattached only after screen geometry is current."""
+    _quiet_arrange(monkeypatch)
+    m = make_monitor()
+    m.m = (0, 0, 0, 0)
+    m.wlr_output.enabled = True
+    s = make_server(m)
+    seen = []
+
+    def refresh(_server, monitor):
+        monitor.m = (0, 0, 1000, 800)
+        monitor.w = monitor.m
+
+    monkeypatch.setattr(wl, "_refresh_monitor_box", refresh)
+    monkeypatch.setattr(wl, "_attach_orphaned_clients",
+                        lambda _server, monitor: seen.append(monitor.m))
+
+    wl.update_monitors(s)
+
+    assert seen == [(0, 0, 1000, 800)]
+
+
+def test_attach_orphans_batched(monkeypatch):
+    """Reattaching windows itself must not resize them one by one."""
+    m = make_monitor()
+    s = make_server(m)
+    a = make_client(m)
+    b = make_client(m)
+    a.monitor = None
+    b.monitor = None
+    s.clients.extend([a, b])
+    monkeypatch.setattr(wl, "arrange", lambda *_a: pytest.fail("arranged"))
+    monkeypatch.setattr(wl, "resize", lambda *_a, **_k: pytest.fail("resized"))
+
+    wl._attach_orphaned_clients(s, m)  # pylint: disable=protected-access
+
+    assert a.monitor is m
+    assert b.monitor is m
+
+
+def test_set_monitor_arranges_both(monkeypatch):
+    """Moving a window between screens updates tags and both layouts."""
+    old = make_monitor()
+    new = make_monitor(tags_mask=2)
+    s = make_server(old)
+    s.monitors.append(new)
+    c = make_client(old)
+    calls = []
+    monkeypatch.setattr(wl, "arrange", lambda _s, m: calls.append(m))
+
+    wl.set_monitor(s, c, new, 0)
+
+    assert c.monitor is new
+    assert c.tags == 2
+    assert calls == [old, new]
+
+
+def test_set_monitor_detaches(monkeypatch):
+    """Moving a window to no screen arranges only its old screen."""
+    old = make_monitor()
+    s = make_server(old)
+    c = make_client(old)
+    calls = []
+    monkeypatch.setattr(wl, "arrange", lambda _s, m: calls.append(m))
+
+    wl.set_monitor(s, c, None, c.tags)
+
+    assert c.monitor is None
+    assert calls == [old]
+
+
+def test_set_monitor_fullscreen(monkeypatch):
+    """Fullscreen windows are fitted to the new screen when moved."""
+    old = make_monitor()
+    new = make_monitor()
+    s = make_server(old)
+    c = make_client(old, fullscreen=True)
+    calls = []
+    monkeypatch.setattr(wl, "arrange", lambda _s, m: calls.append(m))
+
+    wl.set_monitor(s, c, new, c.tags)
+
+    assert c.monitor is new
+    assert c.geometry == new.m
+    assert calls == [old, new]
 
 
 def test_apply_per_head(monkeypatch):
@@ -1145,6 +1268,60 @@ def test_update_monitors_lock_resize(monkeypatch):
         s.locked_bg, 3000, 900)
     wl.lib.wlr_session_lock_surface_v1_configure.assert_called_with(
         m.lock_surface, 1000, 800)
+
+
+def test_on_new_output_adopts_orphans(monkeypatch):
+    """New screens adopt windows orphaned while every output was gone."""
+    adopted = []
+    rule = SN(master_factor=0.55, num_master=1, layout_index=0, x=-1, y=-1)
+    wlr_output = SN(name=wl.ffi.NULL)
+    monkeypatch.setattr(wl, "_monitor_rule_for", lambda _name: rule)
+    monkeypatch.setattr(wl, "_refresh_monitor_box", lambda *_a: None)
+    monkeypatch.setattr(wl, "_attach_orphaned_clients",
+                        lambda _s, m: adopted.append(m))
+    monkeypatch.setattr(wl, "arrange_layers", lambda *_a: None)
+    monkeypatch.setattr(wl, "arrange", lambda *_a: None)
+    monkeypatch.setattr(wl, "print_status", lambda *_a: None)
+    s = make_server(make_monitor())
+    s.monitors.clear()
+    s.selected_monitor = None
+
+    wl.on_new_output(s, wlr_output)
+
+    assert adopted == [s.monitors[0]]
+
+
+def test_cleanup_monitor_migrates_clients(monkeypatch):
+    """Removing a screen moves its windows through set_monitor."""
+    monkeypatch.setattr(wl, "arrange", lambda *_a: None)
+    monkeypatch.setattr(wl, "print_status", lambda *_a: None)
+    gone = make_monitor()
+    survivor = make_monitor()
+    s = make_server(gone)
+    s.monitors.append(survivor)
+    c = make_client(gone)
+    s.clients.append(c)
+
+    wl.cleanup_monitor(s, gone)
+
+    assert c.monitor is survivor
+
+
+def test_cleanup_monitor_disables_before_migrate(monkeypatch):
+    """Windows are not resized on a screen being removed."""
+    resizes = []
+    monkeypatch.setattr(wl, "resize", lambda *_a, **_k: resizes.append(True))
+    monkeypatch.setattr(wl, "print_status", lambda *_a: None)
+    gone = make_monitor()
+    s = make_server(gone)
+    c = make_client(gone)
+    s.clients.append(c)
+
+    wl.cleanup_monitor(s, gone)
+
+    assert c.monitor is None
+    assert not resizes
+    assert gone not in s.monitors
 
 
 def test_cleanup_monitor_lock_surface(monkeypatch):

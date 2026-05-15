@@ -135,7 +135,7 @@ Without these you can't have a bar, wallpaper, lockscreen, or proper clipboard.
 (`wlr_keyboard_group` is no longer here — it's in Tier 0 #8.)
 
 38. **libinput device config** — tap-to-click, tap-and-drag, natural scrolling, accel profile, send-events mode, disable-while-typing, left-handed, click method. Guarded by `wlr_input_device_is_libinput`.
-39. **VT switching** — `chvt` action on Ctrl+Alt+F1..F12 via `wlr_session_change_vt`.
+39. [DONE] **VT switching** — `chvt` action on Ctrl+Alt+F1..F12 via `wlr_session_change_vt`.
 40. **Sloppy focus** — focus follows mouse (`sloppy_focus`); skipped when `CursorMode != Normal` (Tier 1 #19) or while a layer surface holds keyboard-interactive focus.
 41. **`wlr_pointer_constraints_v1`** + **`wlr_relative_pointer_v1`** — locked/confined pointers, FPS games, Blender. `cursor_warp_to_hint` on constraint commit.
 42. **`wlr_virtual_keyboard_v1`** + **`wlr_virtual_pointer_v1`** — `wtype`, `wayvnc`, `ydotool`. Virtual keyboards join the existing keyboard group from Tier 0 #8; virtual pointers attach to `wlr_cursor`.

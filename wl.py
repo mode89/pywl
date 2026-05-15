@@ -206,6 +206,7 @@ class Server:  # pylint: disable=too-many-instance-attributes
     display: object
     loop: object
     backend: object
+    session: object   # wlr_session *, or NULL on the headless/nested backends
     renderer: object
     allocator: object
     compositor: object
@@ -389,6 +390,9 @@ def _default_config() -> SimpleNamespace:
         KeyBinding(MOD | SHIFT, "period", "tag_monitor", +1),
         KeyBinding(MOD | SHIFT, "q",      "quit", None),
     ]
+    for n in range(1, 13):
+        keys.append(KeyBinding(
+            CTRL | lib.WLR_MODIFIER_ALT, f"F{n}", "chvt", n))
     for i in range(TAG_COUNT):
         keys.extend(tag_keys(str(i + 1), i))
 
@@ -471,9 +475,11 @@ def setup() -> Server:  # pylint: disable=too-many-locals,too-many-statements
     loop = lib.wl_display_get_event_loop(display)
 
     _trace("setup: backend")
-    backend = lib.wlr_backend_autocreate(loop, ffi.NULL)
+    session_pp = ffi.new("struct wlr_session **")
+    backend = lib.wlr_backend_autocreate(loop, session_pp)
     if backend == ffi.NULL:
         die("couldn't create backend")
+    session = session_pp[0]
 
     _trace("setup: renderer")
     renderer = lib.wlr_renderer_autocreate(backend)
@@ -552,7 +558,7 @@ def setup() -> Server:  # pylint: disable=too-many-locals,too-many-statements
     xcursor_mgr = lib.wlr_xcursor_manager_create(theme, config.cursor_size)
 
     server = Server(
-        display=display, loop=loop, backend=backend,
+        display=display, loop=loop, backend=backend, session=session,
         renderer=renderer, allocator=allocator, compositor=compositor,
         output_layout=output_layout, scene=scene, scene_layout=scene_layout,
         layers=layers, root_bg=root_bg, locked_bg=locked_bg,
@@ -731,6 +737,7 @@ def on_new_output(server: Server, data) -> None:
         server.selected_monitor = monitor
 
     _refresh_monitor_box(server, monitor)
+    _attach_orphaned_clients(server, monitor)
 
     monitor.listeners = [
         listen(lib.pywl_output_frame(wlr_output),
@@ -795,7 +802,7 @@ def _on_output_request_state(monitor: Monitor, data) -> None:
 
 
 def cleanup_monitor(server: Server, monitor: Monitor) -> None:
-    """Migrate clients off this monitor, then tear it down."""
+    """Tear down a destroyed screen, then move its windows elsewhere."""
     for handle in monitor.listeners:
         handle.remove()
     monitor.listeners.clear()
@@ -803,27 +810,92 @@ def cleanup_monitor(server: Server, monitor: Monitor) -> None:
         on_lock_surface_destroy(server, monitor, monitor.lock_surface)
     if monitor in server.monitors:
         server.monitors.remove(monitor)
-
-    survivor = server.monitors[0] if server.monitors else None
-    for client in server.clients:
-        if client.monitor is monitor:
-            client.monitor = survivor
-            if client.fullscreen and survivor is not None:
-                set_fullscreen(server, client, True)
-
-    if server.selected_monitor is monitor:
-        server.selected_monitor = survivor
-
     lib.wlr_output_layout_remove(server.output_layout, monitor.wlr_output)
-    if survivor is not None:
-        arrange(server, survivor)
-    focus_client(server, top_client(server, server.selected_monitor), lift=True)
+    close_monitor(server, monitor)
     print_status(server)
 
 
+def close_monitor(server: Server, monitor: Monitor) -> None:
+    """Move windows away from a screen that is disabled or being removed."""
+    survivor = next((m for m in server.monitors if m.wlr_output.enabled), None)
+    if server.selected_monitor is monitor:
+        server.selected_monitor = survivor
+
+    for client in server.clients:
+        if client.monitor is monitor:
+            set_monitor(server, client, survivor, client.tags)
+
+    focus_client(server, top_client(server, server.selected_monitor), lift=True)
+
+
+def set_monitor(
+    server: Server, client: Client, monitor: Monitor | None, tags: int
+) -> None:
+    """Move a window to another screen, keeping layout state coherent.
+
+    This is the Python equivalent of dwl's `setmon`: one place updates the
+    window's monitor/tags, arranges the old screen, and then arranges or
+    reapplies fullscreen on the new screen.
+    """
+    old_monitor = client.monitor
+    if old_monitor is monitor:
+        return
+    client.monitor = monitor
+    if old_monitor is not None:
+        arrange(server, old_monitor)
+    if monitor is None:
+        return
+    client.tags = tags or monitor.selected_tags
+    if client.fullscreen:
+        set_fullscreen(server, client, True)
+    else:
+        arrange(server, monitor)
+
+
+def _attach_orphaned_clients(server: Server, monitor: Monitor) -> None:
+    """Attach mapped windows that lost their active screen.
+
+    Do this as a batch, without arranging per window. If clients are attached
+    one at a time, the first tiled client briefly occupies the whole screen and
+    then shrinks when the next one is attached, which makes apps reflow on VT
+    restore. The caller arranges once after all clients are back on a monitor.
+    """
+    for client in server.clients:
+        if (client.mapped and (client.monitor is None
+                or client.monitor not in server.monitors)):
+            client.monitor = monitor
+            client.tags = client.tags or monitor.selected_tags
+
+
 def update_monitors(server: Server) -> None:
-    """Layout-change hook: refresh every monitor's box, arrange, and
-    advertise the new configuration to output-management clients."""
+    """Layout-change hook: refresh every active monitor's box, arrange,
+    and advertise the new configuration to output-management clients.
+
+    wlroots can temporarily disable DRM outputs while the compositor's VT is
+    inactive. dwl removes those outputs from the layout and skips arranging
+    their windows until they come back; otherwise clients can be resized
+    against a 0x0 layout box and stop matching later layout operations.
+    """
+    output_config = lib.wlr_output_configuration_v1_create()
+
+    for monitor in server.monitors:
+        if monitor.wlr_output.enabled:
+            continue
+        lib.wlr_output_layout_remove(server.output_layout, monitor.wlr_output)
+        close_monitor(server, monitor)
+        monitor.m = monitor.w = (0, 0, 0, 0)
+
+    for monitor in server.monitors:
+        if (monitor.wlr_output.enabled and lib.wlr_output_layout_get(
+                server.output_layout, monitor.wlr_output) == ffi.NULL):
+            lib.wlr_output_layout_add_auto(
+                server.output_layout, monitor.wlr_output)
+
+    enabled = next((m for m in server.monitors if m.wlr_output.enabled), None)
+    if (server.selected_monitor is None
+            or not server.selected_monitor.wlr_output.enabled):
+        server.selected_monitor = enabled
+
     # Hide app content during a lock by sizing the black rect over the
     # full layout (otherwise it stays 0x0).
     layout_box = ffi.new("struct wlr_box *")
@@ -835,9 +907,17 @@ def update_monitors(server: Server) -> None:
     lib.wlr_scene_rect_set_size(
         server.locked_bg, layout_box.width, layout_box.height)
 
-    output_config = lib.wlr_output_configuration_v1_create()
     for monitor in server.monitors:
+        if not monitor.wlr_output.enabled:
+            head = lib.wlr_output_configuration_head_v1_create(
+                output_config, monitor.wlr_output)
+            head.state.enabled = False
+            continue
         _refresh_monitor_box(server, monitor)
+        lib.wlr_scene_output_set_position(
+            monitor.scene_output, monitor.m[0], monitor.m[1])
+        if monitor is server.selected_monitor:
+            _attach_orphaned_clients(server, monitor)
         arrange_layers(server, monitor)
         arrange(server, monitor)
         if monitor.lock_surface is not None:
@@ -849,12 +929,15 @@ def update_monitors(server: Server) -> None:
                 ffi.addressof(scene_tree.node), mx, my)
             lib.wlr_session_lock_surface_v1_configure(
                 monitor.lock_surface, mw, mh)
-        if monitor.wlr_output.enabled:
-            head = lib.wlr_output_configuration_head_v1_create(
-                output_config, monitor.wlr_output)
-            head.state.x, head.state.y = monitor.m[0], monitor.m[1]
+        head = lib.wlr_output_configuration_head_v1_create(
+            output_config, monitor.wlr_output)
+        head.state.x, head.state.y = monitor.m[0], monitor.m[1]
+
     if server.locked:
         _focus_selected_lock_surface(server)
+    elif server.selected_monitor is not None:
+        focus_client(server, top_client(server, server.selected_monitor),
+                     lift=True)
     # set_configuration takes ownership of `output_config`.
     lib.wlr_output_manager_v1_set_configuration(
         server.output_mgr, output_config)
@@ -1017,7 +1100,8 @@ def arrange(server: Server, monitor: Monitor | None) -> None:
     screen, the rest go through the chosen layout (tile/float/monocle),
     and finally we hide windows whose workspace isn't currently
     visible."""
-    if monitor is None:
+    if (monitor is None or not monitor.wlr_output.enabled
+            or monitor not in server.monitors):
         return
     _trace(f"arrange: monitor={monitor.name} layout={monitor.layout_name} "
            f"tags={monitor.selected_tags:#x}")
@@ -2186,11 +2270,7 @@ def action_tag_monitor(server: Server, direction: int) -> None:
     target = monitor_in_direction(server, server.selected_monitor, direction)
     if target is None or target is server.selected_monitor:
         return
-    old_monitor = client.monitor
-    client.monitor = target
-    client.tags = target.selected_tags
-    arrange(server, old_monitor)
-    arrange(server, target)
+    set_monitor(server, client, target, target.selected_tags)
     focus_client(server, client, lift=True)
 
 
@@ -2205,6 +2285,15 @@ def action_spawn(_server: Server, arg) -> None:
     """Launch an external program (e.g. a terminal) from a keybinding."""
     if arg:
         spawn(arg)
+
+
+def action_chvt(server: Server, arg) -> None:
+    """Switch to virtual terminal `arg` (1..12). No-op when running
+    nested (e.g. inside another Wayland session) where there's no
+    underlying TTY session to switch."""
+    if server.session == ffi.NULL:
+        return
+    lib.wlr_session_change_vt(server.session, int(arg))
 
 
 def action_move_resize(server: Server, mode: str) -> None:
@@ -2236,6 +2325,7 @@ ACTIONS: dict[str, Callable[[Server, object], None]] = {
     "focus_monitor": action_focus_monitor,
     "tag_monitor": action_tag_monitor,
     "move_resize": action_move_resize,
+    "chvt": action_chvt,
     "quit": action_quit,
 }
 
