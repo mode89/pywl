@@ -518,6 +518,18 @@ void wlr_output_configuration_v1_send_failed(
         struct wlr_output_configuration_v1 *);
 struct wl_signal *pywl_output_mgr_apply(struct wlr_output_manager_v1 *);
 struct wl_signal *pywl_output_mgr_test(struct wlr_output_manager_v1 *);
+
+// output-power-management: DPMS (clients turn screens on/off).
+struct wlr_output_power_v1_set_mode_event {
+    struct wlr_output *output;
+    uint32_t mode;
+    ...;
+};
+struct wlr_output_power_manager_v1;
+struct wlr_output_power_manager_v1 *wlr_output_power_manager_v1_create(
+        struct wl_display *);
+struct wl_signal *pywl_output_power_mgr_set_mode(
+        struct wlr_output_power_manager_v1 *);
 // wl_container_of for the head list: recovers the head from its link node.
 struct wlr_output_configuration_head_v1 *pywl_config_head_from_link(
         struct wl_list *link);
@@ -645,6 +657,7 @@ SOURCE = r"""
 #include <wlr/types/wlr_xdg_decoration_v1.h>
 #include <wlr/types/wlr_xdg_output_v1.h>
 #include <wlr/types/wlr_output_management_v1.h>
+#include <wlr/types/wlr_output_power_management_v1.h>
 #include <wlr/types/wlr_server_decoration.h>
 #include <wlr/types/wlr_xdg_shell.h>
 #include <wlr/util/box.h>
@@ -812,6 +825,10 @@ struct wlr_output_configuration_head_v1 *pywl_config_head_from_link(
     struct wlr_output_configuration_head_v1 *head;
     return wl_container_of(l, head, link);
 }
+struct wl_signal *pywl_output_power_mgr_set_mode(
+        struct wlr_output_power_manager_v1 *m) {
+    return &m->events.set_mode;
+}
 """
 
 
@@ -848,12 +865,15 @@ def _build():
     wlr_protocols_dir = subprocess.check_output(
         ["pkg-config", "--variable=pkgdatadir", "wlr-protocols"]
     ).decode().strip()
-    subprocess.check_call([
-        "wayland-scanner", "server-header",
-        os.path.join(
-            wlr_protocols_dir, "unstable/wlr-layer-shell-unstable-v1.xml"),
-        os.path.join(build_dir, "wlr-layer-shell-unstable-v1-protocol.h"),
-    ])
+    for stem in (
+            "wlr-layer-shell-unstable-v1",
+            "wlr-output-power-management-unstable-v1",
+    ):
+        subprocess.check_call([
+            "wayland-scanner", "server-header",
+            os.path.join(wlr_protocols_dir, f"unstable/{stem}.xml"),
+            os.path.join(build_dir, f"{stem}-protocol.h"),
+        ])
     include_dirs.append(build_dir)
 
     builder = cffi.FFI()

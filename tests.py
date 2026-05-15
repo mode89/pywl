@@ -103,6 +103,7 @@ def make_server(monitor: wl.Monitor) -> wl.Server:
         layers={layer: MagicMock() for layer in wl.Layer},
         root_bg=MagicMock(), locked_bg=MagicMock(), drag_icon=MagicMock(),
         xdg_shell=MagicMock(), output_mgr=MagicMock(),
+        output_power_mgr=MagicMock(),
         seat=MagicMock(), cursor=MagicMock(),
         xcursor_mgr=MagicMock(), keyboard_group=MagicMock(),
     )
@@ -848,3 +849,29 @@ def test_apply_failed_commit_reports_failure(monkeypatch):
     wl.lib.wlr_output_configuration_v1_send_failed.assert_called_once()
     wl.lib.wlr_output_configuration_v1_send_succeeded.assert_not_called()
     wl.lib.wlr_output_configuration_v1_destroy.assert_called_once()
+
+
+def test_output_power_set_mode_disables_screen(monkeypatch):
+    """A DPMS off event commits `enabled=False` on the matching output."""
+    _quiet_arrange(monkeypatch)
+    monitor = make_monitor()
+    s = make_server(monitor)
+    event = SN(output=monitor.wlr_output, mode=0)
+
+    wl.on_output_power_set_mode(s, event)
+
+    wl.lib.wlr_output_state_set_enabled.assert_called_once()
+    _state, enabled = wl.lib.wlr_output_state_set_enabled.call_args.args
+    assert enabled is False
+    wl.lib.wlr_output_commit_state.assert_called_once()
+
+
+def test_output_power_set_mode_unknown_output_noop(monkeypatch):
+    """Events for outputs we don't track are ignored."""
+    _quiet_arrange(monkeypatch)
+    s = make_server(make_monitor())
+    event = SN(output=MagicMock(), mode=1)
+
+    wl.on_output_power_set_mode(s, event)
+
+    wl.lib.wlr_output_commit_state.assert_not_called()

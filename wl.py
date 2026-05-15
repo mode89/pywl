@@ -208,6 +208,7 @@ class Server:  # pylint: disable=too-many-instance-attributes
     drag_icon: object
     xdg_shell: object
     output_mgr: object
+    output_power_mgr: object
     seat: object
     cursor: object
     xcursor_mgr: object
@@ -495,6 +496,8 @@ def setup() -> Server:  # pylint: disable=too-many-locals,too-many-statements
     lib.wlr_xdg_output_manager_v1_create(display, output_layout)
     # Lets kanshi/wlr-randr query and reconfigure outputs.
     output_mgr = lib.wlr_output_manager_v1_create(display)
+    # DPMS: lets clients (swayidle, wlopm) power screens off and back on.
+    output_power_mgr = lib.wlr_output_power_manager_v1_create(display)
 
     xdg_shell = lib.wlr_xdg_shell_create(display, 6)
     _trace(f"setup: xdg_shell={xdg_shell}")
@@ -526,7 +529,7 @@ def setup() -> Server:  # pylint: disable=too-many-locals,too-many-statements
         output_layout=output_layout, scene=scene, scene_layout=scene_layout,
         layers=layers, root_bg=root_bg, locked_bg=locked_bg,
         drag_icon=drag_icon, xdg_shell=xdg_shell, output_mgr=output_mgr,
-        seat=seat,
+        output_power_mgr=output_power_mgr, seat=seat,
         cursor=cursor, xcursor_mgr=xcursor_mgr, keyboard_group=ffi.NULL,
     )
     server.keyboard_group = create_keyboard_group(server)
@@ -550,6 +553,8 @@ def setup() -> Server:  # pylint: disable=too-many-locals,too-many-statements
                lambda d: on_output_mgr_apply_or_test(server, d, test=False)),
         listen(lib.pywl_output_mgr_test(output_mgr),
                lambda d: on_output_mgr_apply_or_test(server, d, test=True)),
+        listen(lib.pywl_output_power_mgr_set_mode(output_power_mgr),
+               lambda d: on_output_power_set_mode(server, d)),
         listen(lib.pywl_xdg_shell_new_toplevel(xdg_shell),
                lambda d: on_new_xdg_toplevel(server, d)),
         listen(lib.pywl_xdg_shell_new_popup(xdg_shell),
@@ -854,6 +859,23 @@ def on_output_mgr_apply_or_test(server: Server, data, test: bool) -> None:
     lib.wlr_output_configuration_v1_destroy(output_config)
     # Some commits don't change layout-relevant fields and so don't trigger
     # the layout's change signal; force a refresh. See dwl issue #577.
+    update_monitors(server)
+
+
+def on_output_power_set_mode(server: Server, data) -> None:
+    """A DPMS client asked to power a screen on or off. Toggle the
+    output's enabled state; `update_monitors` re-advertises the new
+    config to output-management clients."""
+    event = ffi.cast(
+        "struct wlr_output_power_v1_set_mode_event *", data)
+    monitor = next(
+        (m for m in server.monitors if m.wlr_output == event.output), None)
+    if monitor is None:
+        return
+    output_state = lib.pywl_output_state_new()
+    lib.wlr_output_state_set_enabled(output_state, bool(event.mode))
+    lib.wlr_output_commit_state(monitor.wlr_output, output_state)
+    lib.pywl_output_state_free(output_state)
     update_monitors(server)
 
 
