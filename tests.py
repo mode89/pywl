@@ -1,10 +1,6 @@
-# pylint: disable=too-many-lines
-"""
-Tests for pywl.
+"""Tests for pywl."""
 
-Naming: `test_<system>_<scenario>`, where `<system>` is 1-2 words for the
-subsystem under test and `<scenario>` is 1-2 words for the specific case.
-"""
+# pylint: disable=too-many-lines
 
 from __future__ import annotations
 
@@ -464,7 +460,7 @@ def test_commit_repins_size():
         c.xdg_toplevel, inner_w, inner_h)
 
 
-def test_commit_initial_no_resize():
+def test_commit_initial():
     """Initial commit follows the setup path, not the re-resize path."""
     m = make_monitor(1000, 800)
     s = make_server(m)
@@ -490,7 +486,7 @@ def _reset_render_mocks():
     wl.lib.wlr_scene_output_send_frame_done.reset_mock()
 
 
-def test_render_commits_when_idle():
+def test_render_idle():
     """When no client has a pending resize, painting proceeds normally."""
     m = make_monitor()
     s = make_server(m)
@@ -505,7 +501,7 @@ def test_render_commits_when_idle():
     wl.lib.wlr_scene_output_send_frame_done.assert_called_once()
 
 
-def test_render_skips_pending_tile():
+def test_render_pending_tile():
     """A pending tile resize stalls the frame commit (so the user sees an
     atomic layout change), but `frame_done` still fires so the client
     keeps animating."""
@@ -523,7 +519,7 @@ def test_render_skips_pending_tile():
     wl.lib.wlr_scene_output_send_frame_done.assert_called_once()
 
 
-def test_render_ignores_pending_float():
+def test_render_pending_float():
     """Floating clients don't gate the frame; they're outside the tile
     transaction and can paint at their own pace."""
     m = make_monitor()
@@ -538,7 +534,7 @@ def test_render_ignores_pending_float():
     wl.lib.wlr_scene_output_commit.assert_called_once()
 
 
-def test_render_ignores_pending_other_monitor():
+def test_render_other_monitor():
     """A pending tile on monitor B must not stall monitor A."""
     a = make_monitor(1000, 800)
     b = make_monitor(1000, 800)
@@ -554,7 +550,7 @@ def test_render_ignores_pending_other_monitor():
     wl.lib.wlr_scene_output_commit.assert_called_once()
 
 
-def test_render_ignores_pending_hidden_tag():
+def test_render_hidden_tag():
     """A pending tile on a tag the user is not viewing must not stall the
     monitor — its pixels aren't on screen this frame anyway."""
     m = make_monitor(tags_mask=1)
@@ -571,7 +567,7 @@ def test_render_ignores_pending_hidden_tag():
 
 # --- resize_serial ack tracking --------------------------------------------
 
-def test_resize_short_circuits_when_dims_match():
+def test_resize_dims_match():
     """resize() must not re-issue set_size when the client already
     committed at our requested inner size; the gate would otherwise
     re-arm on every commit and the output would never paint."""
@@ -591,7 +587,7 @@ def test_resize_short_circuits_when_dims_match():
     assert c.resize_serial == 0
 
 
-def test_resize_calls_set_size_when_dims_differ():
+def test_resize_dims_differ():
     """When the client's current size doesn't match the tile, `resize`
     issues a new `set_size` and records the configure serial so the
     render gate can wait for the client to ack it."""
@@ -733,7 +729,7 @@ def _fake_head(output=None, **fields) -> object:
     return SN(state=state)
 
 
-def test_update_monitors_advertises_enabled_only(monkeypatch):
+def test_update_monitors_enabled_only(monkeypatch):
     """Disabled outputs are dropped from the advertised configuration."""
     _quiet_arrange(monkeypatch)
     on = make_monitor()
@@ -758,7 +754,7 @@ def test_update_monitors_advertises_enabled_only(monkeypatch):
         s.output_mgr, fake_config)
 
 
-def test_apply_commits_per_head(monkeypatch):
+def test_apply_per_head(monkeypatch):
     """A successful apply commits each head and sends `succeeded`."""
     output = SN(enabled=True)
     head = _fake_head(output=output, x=10, y=20)
@@ -778,7 +774,7 @@ def test_apply_commits_per_head(monkeypatch):
     wl.lib.wlr_output_configuration_v1_destroy.assert_called_once()
 
 
-def test_apply_test_only_previews(monkeypatch):
+def test_apply_test_only(monkeypatch):
     """`test=True` previews via `wlr_output_test_state`; nothing is committed
     and the layout is left untouched."""
     head = _fake_head()
@@ -794,7 +790,7 @@ def test_apply_test_only_previews(monkeypatch):
     wl.lib.wlr_output_configuration_v1_send_succeeded.assert_called_once()
 
 
-def test_apply_uses_custom_mode_when_no_named_mode(monkeypatch):
+def test_apply_custom_mode(monkeypatch):
     """`mode == NULL` means the client gave width/height/refresh directly."""
     head = _fake_head(
         mode=wl.ffi.NULL, width=1280, height=720, refresh=59_940)
@@ -811,7 +807,7 @@ def test_apply_uses_custom_mode_when_no_named_mode(monkeypatch):
     assert (w, h, r) == (1280, 720, 59_940)
 
 
-def test_apply_skips_layout_add_when_position_unchanged(monkeypatch):
+def test_apply_position_unchanged(monkeypatch):
     """Re-adding at the same position would mark the output as manually
     placed; the handler skips that redundant call."""
     output = SN(enabled=True)
@@ -826,7 +822,7 @@ def test_apply_skips_layout_add_when_position_unchanged(monkeypatch):
     wl.lib.wlr_output_layout_add.assert_not_called()
 
 
-def test_apply_disabled_head_skips_mode(monkeypatch):
+def test_apply_disabled_head(monkeypatch):
     """A disabled head only flips `enabled`; mode/scale/etc. aren't set."""
     head = _fake_head(enabled=False)
     monkeypatch.setattr(wl, "_iter_config_heads", lambda _c: iter([head]))
@@ -841,7 +837,7 @@ def test_apply_disabled_head_skips_mode(monkeypatch):
     wl.lib.wlr_output_state_set_scale.assert_not_called()
 
 
-def test_apply_failed_commit_reports_failure(monkeypatch):
+def test_apply_commit_failed(monkeypatch):
     """If any head's commit fails, the client gets a single `failed`."""
     monkeypatch.setattr(
         wl, "_iter_config_heads", lambda _c: iter([_fake_head()]))
@@ -855,7 +851,7 @@ def test_apply_failed_commit_reports_failure(monkeypatch):
     wl.lib.wlr_output_configuration_v1_destroy.assert_called_once()
 
 
-def test_output_power_set_mode_disables_screen(monkeypatch):
+def test_output_power_disable(monkeypatch):
     """A DPMS off event commits `enabled=False` on the matching output."""
     _quiet_arrange(monkeypatch)
     monitor = make_monitor()
@@ -870,7 +866,7 @@ def test_output_power_set_mode_disables_screen(monkeypatch):
     wl.lib.wlr_output_commit_state.assert_called_once()
 
 
-def test_output_power_set_mode_unknown_output_noop(monkeypatch):
+def test_output_power_unknown(monkeypatch):
     """Events for outputs we don't track are ignored."""
     _quiet_arrange(monkeypatch)
     s = make_server(make_monitor())
@@ -881,7 +877,7 @@ def test_output_power_set_mode_unknown_output_noop(monkeypatch):
     wl.lib.wlr_output_commit_state.assert_not_called()
 
 
-def test_session_lock_locks_and_focuses_surface(monkeypatch):
+def test_session_lock_focus(monkeypatch):
     """new_lock enables the backdrop, blanks focus, and accepts the lock;
     a per-output surface then takes keyboard focus on the selected monitor."""
     _quiet_arrange(monkeypatch)
@@ -905,7 +901,7 @@ def test_session_lock_locks_and_focuses_surface(monkeypatch):
     wl.lib.wlr_seat_keyboard_notify_enter.assert_called()
 
 
-def test_session_lock_start_clears_pointer_and_grab():
+def test_session_lock_clears_pointer():
     """Lock start drops stale pointer focus and compositor drags."""
     m = make_monitor()
     s = make_server(m)
@@ -919,7 +915,7 @@ def test_session_lock_start_clears_pointer_and_grab():
     assert s.cursor_mode is wl.CursorMode.NORMAL
 
 
-def test_session_lock_rejects_second_locker():
+def test_session_lock_second_locker():
     """While a locker is active, a second new_lock is destroyed outright."""
     m = make_monitor()
     s = make_server(m)
@@ -933,7 +929,7 @@ def test_session_lock_rejects_second_locker():
     wl.lib.wlr_session_lock_v1_send_locked.assert_not_called()
 
 
-def test_session_lock_unlock_restores_focus(monkeypatch):
+def test_session_lock_unlock_focus(monkeypatch):
     """unlock disables the backdrop, clears `locked`, and refocuses."""
     _quiet_arrange(monkeypatch)
     # process_cursor_motion would walk monitors with mocked cursor coords.
@@ -952,7 +948,7 @@ def test_session_lock_unlock_restores_focus(monkeypatch):
         wl.lib.pywl_scene_rect_node.return_value, False)
 
 
-def test_focus_client_noop_while_locked():
+def test_focus_client_locked():
     """While locked, focus_client must not touch the seat."""
     m = make_monitor()
     s = make_server(m)
@@ -965,7 +961,7 @@ def test_focus_client_noop_while_locked():
     wl.lib.wlr_xdg_toplevel_set_activated.assert_not_called()
 
 
-def test_cursor_button_while_locked_does_not_bind_or_focus():
+def test_cursor_button_locked_focus():
     """Locked: skip mouse bindings + click-to-focus; still forward."""
     m = make_monitor()
     s = make_server(m)
@@ -979,7 +975,7 @@ def test_cursor_button_while_locked_does_not_bind_or_focus():
     wl.lib.wlr_seat_pointer_notify_button.assert_called_once()
 
 
-def test_keyboard_key_while_locked_skips_bindings(monkeypatch):
+def test_keyboard_key_locked(monkeypatch):
     """Locked: compositor keybindings are skipped; key still forwards."""
     m = make_monitor()
     s = make_server(m)
@@ -996,7 +992,7 @@ def test_keyboard_key_while_locked_skips_bindings(monkeypatch):
         s.seat, 123, 24, wl.lib.WL_KEYBOARD_KEY_STATE_PRESSED)
 
 
-def test_cursor_button_while_locked_skips_mouse_bindings(monkeypatch):
+def test_cursor_button_locked_binding(monkeypatch):
     """Locked: mouse bindings are skipped even if the click matches."""
     action = MagicMock()
     monkeypatch.setitem(wl.ACTIONS, "move_resize", action)
@@ -1016,7 +1012,7 @@ def test_cursor_button_while_locked_skips_mouse_bindings(monkeypatch):
     wl.lib.wlr_seat_pointer_notify_button.assert_called_once()
 
 
-def test_session_lock_crash_keeps_screen_locked(monkeypatch):
+def test_session_lock_crash(monkeypatch):
     """If the locker dies before unlock, keep the black screen enabled."""
     refresh = MagicMock()
     monkeypatch.setattr(wl, "process_cursor_motion", refresh)
@@ -1034,7 +1030,7 @@ def test_session_lock_crash_keeps_screen_locked(monkeypatch):
     refresh.assert_not_called()
 
 
-def test_session_lock_unlock_refreshes_pointer(monkeypatch):
+def test_session_lock_unlock_pointer(monkeypatch):
     """Unlock re-picks the pointer target without waiting for motion."""
     refresh = MagicMock()
     monkeypatch.setattr(wl, "process_cursor_motion", refresh)
@@ -1049,7 +1045,7 @@ def test_session_lock_unlock_refreshes_pointer(monkeypatch):
     refresh.assert_called_once_with(s, 0)
 
 
-def test_lock_surface_destroy_self_removes_listener(monkeypatch):
+def test_lock_surface_destroy_self(monkeypatch):
     """wlroots requires the destroy listener list empty by teardown."""
     callbacks = []
     handle = MagicMock()
@@ -1071,7 +1067,7 @@ def test_lock_surface_destroy_self_removes_listener(monkeypatch):
     assert m.lock_surface is None
 
 
-def test_lock_surface_destroy_moves_focus_to_another_surface():
+def test_lock_surface_destroy_refocus():
     """If one lock surface dies, keyboard focus stays within the lock."""
     m1 = make_monitor()
     m2 = make_monitor()
@@ -1091,7 +1087,7 @@ def test_lock_surface_destroy_moves_focus_to_another_surface():
     wl.lib.wlr_seat_keyboard_notify_enter.assert_called_once()
 
 
-def test_lock_surface_destroy_clears_focus_if_last_surface():
+def test_lock_surface_destroy_last():
     """If no lock surface remains, keyboard focus must be empty."""
     m = make_monitor()
     s = make_server(m)
@@ -1106,7 +1102,7 @@ def test_lock_surface_destroy_clears_focus_if_last_surface():
     wl.lib.wlr_seat_keyboard_clear_focus.assert_called_once_with(s.seat)
 
 
-def test_update_monitors_refocuses_selected_lock_surface(monkeypatch):
+def test_update_monitors_lock_focus(monkeypatch):
     """After output changes, the selected screen's lock surface gets keys."""
     _quiet_arrange(monkeypatch)
     layout_box = SN(x=0, y=0, width=1000, height=800)
@@ -1129,7 +1125,7 @@ def test_update_monitors_refocuses_selected_lock_surface(monkeypatch):
         s.seat, lock_surface.surface, wl.ffi.NULL, 0, wl.ffi.NULL)
 
 
-def test_update_monitors_resizes_locked_bg_and_lock_surface(monkeypatch):
+def test_update_monitors_lock_resize(monkeypatch):
     """Layout changes keep app content hidden and lock surfaces fitted."""
     _quiet_arrange(monkeypatch)
     layout_box = SN(x=-10, y=20, width=3000, height=900)
@@ -1151,7 +1147,7 @@ def test_update_monitors_resizes_locked_bg_and_lock_surface(monkeypatch):
         m.lock_surface, 1000, 800)
 
 
-def test_cleanup_monitor_destroys_lock_surface_before_removal(monkeypatch):
+def test_cleanup_monitor_lock_surface(monkeypatch):
     """Unplugging a screen while locked forgets its lock surface."""
     monkeypatch.setattr(wl, "arrange", lambda *_a: None)
     monkeypatch.setattr(wl, "print_status", lambda *_a: None)
@@ -1174,7 +1170,7 @@ def test_cleanup_monitor_destroys_lock_surface_before_removal(monkeypatch):
     wl.lib.wlr_seat_keyboard_notify_enter.assert_called_once()
 
 
-def test_cleanup_removes_global_listeners_before_destroying_clients():
+def test_cleanup_listener_order():
     """Shutdown should not let client teardown fire global listeners that
     still point at compositor-owned objects."""
     m = make_monitor()
@@ -1189,9 +1185,7 @@ def test_cleanup_removes_global_listeners_before_destroying_clients():
     assert order[:2] == ["remove", "destroy_clients"]
 
 
-def test_unmap_arranges_before_scene_destroy_and_clears_surface_data(
-    monkeypatch,
-):
+def test_unmap_scene_order(monkeypatch):
     """Idle-inhibit visibility is checked while the scene node is still
     valid; after that the surface must not keep a stale scene pointer."""
     m = make_monitor()
@@ -1221,7 +1215,7 @@ def test_unmap_arranges_before_scene_destroy_and_clears_surface_data(
     assert order == ["arrange", "destroy"]
 
 
-def test_cursor_motion_zero_time_does_not_notify_idle_activity(monkeypatch):
+def test_cursor_motion_zero_time(monkeypatch):
     """Internal pointer refreshes use time 0 and should not reset idle."""
     m = make_monitor()
     s = make_server(m)
@@ -1234,7 +1228,7 @@ def test_cursor_motion_zero_time_does_not_notify_idle_activity(monkeypatch):
     wl.lib.wlr_idle_notifier_v1_notify_activity.assert_not_called()
 
 
-def test_cursor_motion_event_notifies_idle_activity(monkeypatch):
+def test_cursor_motion_idle(monkeypatch):
     """Real pointer motion should reset idle."""
     m = make_monitor()
     s = make_server(m)
@@ -1248,7 +1242,7 @@ def test_cursor_motion_event_notifies_idle_activity(monkeypatch):
         s.idle_notifier, s.seat)
 
 
-def test_idle_inhibit_no_inhibitors_clears_inhibited(monkeypatch):
+def test_idle_inhibit_none(monkeypatch):
     """Nothing inhibiting: notifier's inhibited flag is False."""
     monkeypatch.setattr(wl, "_iter_idle_inhibitors", lambda _m: iter(()))
     monkeypatch.setattr(wl, "config", SN(idle_inhibit_ignore_visibility=False))
@@ -1260,7 +1254,7 @@ def test_idle_inhibit_no_inhibitors_clears_inhibited(monkeypatch):
         s.idle_notifier, False)
 
 
-def test_idle_inhibit_visible_inhibitor_sets_inhibited(monkeypatch):
+def test_idle_inhibit_visible(monkeypatch):
     """A visible inhibitor (scene node reachable) inhibits idle."""
     monkeypatch.setattr(wl, "config", SN(idle_inhibit_ignore_visibility=False))
     surface = SN(data=SN(node=object()))
@@ -1277,7 +1271,7 @@ def test_idle_inhibit_visible_inhibitor_sets_inhibited(monkeypatch):
         s.idle_notifier, True)
 
 
-def test_idle_inhibit_excluded_surface_ignored(monkeypatch):
+def test_idle_inhibit_excluded(monkeypatch):
     """An inhibitor whose root surface is `exclude` doesn't count."""
     monkeypatch.setattr(wl, "config", SN(idle_inhibit_ignore_visibility=False))
     surface = SN(data=SN(node=object()))
@@ -1293,7 +1287,7 @@ def test_idle_inhibit_excluded_surface_ignored(monkeypatch):
         s.idle_notifier, False)
 
 
-def test_idle_inhibit_bypass_visibility_skips_scene_check(monkeypatch):
+def test_idle_inhibit_bypass(monkeypatch):
     """Ignore-visibility mode inhibits without checking the scene."""
     monkeypatch.setattr(wl, "config", SN(idle_inhibit_ignore_visibility=True))
     inhibitor = SN(surface=SN(data=None))

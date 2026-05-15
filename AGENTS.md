@@ -4,13 +4,19 @@ Wayland compositor written in Python on top of wlroots.
 
 - `wl.py`: entry point.
 - `bindings.py`: inline cffi bindings.
-- `tests.py`: unit tests. Run with `pytest tests.py`.
+- `tests.py`: unit tests.
 - `vm/`: NixOS VM for headed testing (graphical QEMU window with virtio-gpu).
 
 ## Bindings
 
 - `pywl_*` C helpers are plumbing only — static-inline wrappers, alloc/free for opaque-sized structs, accessors for anonymous struct members. For regular named struct fields, declare the struct in the cdef and access from Python directly. Logic stays in Python.
 - All listeners share one `extern "Python"` trampoline; `listen` routes by listener address.
+
+## Testing
+
+Run with `pytest tests.py`.
+
+Name tests `test_<system>_<scenario>`, where `<system>` is 1-2 words for the subsystem under test and `<scenario>` is 1-2 words for the specific case.
 
 ## Linting
 
