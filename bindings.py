@@ -561,6 +561,34 @@ struct wl_signal *pywl_session_lock_unlock(struct wlr_session_lock_v1 *);
 struct wl_signal *pywl_session_lock_destroy(struct wlr_session_lock_v1 *);
 struct wl_signal *pywl_session_lock_surface_destroy(
         struct wlr_session_lock_surface_v1 *);
+
+// idle-notify: ext-idle-notify-v1 (swayidle), and idle-inhibit (video
+// players asking the compositor not to dim/lock the screen).
+struct wlr_idle_notifier_v1;
+struct wlr_idle_notifier_v1 *wlr_idle_notifier_v1_create(struct wl_display *);
+void wlr_idle_notifier_v1_set_inhibited(
+        struct wlr_idle_notifier_v1 *, bool inhibited);
+void wlr_idle_notifier_v1_notify_activity(
+        struct wlr_idle_notifier_v1 *, struct wlr_seat *);
+struct wlr_idle_inhibitor_v1 {
+    struct wlr_surface *surface;
+    struct wl_list link;
+    ...;
+};
+struct wlr_idle_inhibit_manager_v1 {
+    struct wl_list inhibitors;
+    ...;
+};
+struct wlr_idle_inhibit_manager_v1 *wlr_idle_inhibit_v1_create(
+        struct wl_display *);
+struct wl_signal *pywl_idle_inhibit_new_inhibitor(
+        struct wlr_idle_inhibit_manager_v1 *);
+struct wl_signal *pywl_idle_inhibitor_destroy(
+        struct wlr_idle_inhibitor_v1 *);
+struct wlr_idle_inhibitor_v1 *pywl_idle_inhibitor_from_link(struct wl_list *);
+
+bool wlr_scene_node_coords(struct wlr_scene_node *, int *lx, int *ly);
+
 // wl_container_of for the head list: recovers the head from its link node.
 struct wlr_output_configuration_head_v1 *pywl_config_head_from_link(
         struct wl_list *link);
@@ -691,6 +719,8 @@ SOURCE = r"""
 #include <wlr/types/wlr_output_power_management_v1.h>
 #include <wlr/types/wlr_gamma_control_v1.h>
 #include <wlr/types/wlr_session_lock_v1.h>
+#include <wlr/types/wlr_idle_notify_v1.h>
+#include <wlr/types/wlr_idle_inhibit_v1.h>
 #include <wlr/types/wlr_server_decoration.h>
 #include <wlr/types/wlr_xdg_shell.h>
 #include <wlr/util/box.h>
@@ -879,6 +909,18 @@ struct wl_signal *pywl_session_lock_destroy(struct wlr_session_lock_v1 *l) {
 struct wl_signal *pywl_session_lock_surface_destroy(
         struct wlr_session_lock_surface_v1 *s) {
     return &s->events.destroy;
+}
+struct wl_signal *pywl_idle_inhibit_new_inhibitor(
+        struct wlr_idle_inhibit_manager_v1 *m) {
+    return &m->events.new_inhibitor;
+}
+struct wl_signal *pywl_idle_inhibitor_destroy(
+        struct wlr_idle_inhibitor_v1 *i) {
+    return &i->events.destroy;
+}
+struct wlr_idle_inhibitor_v1 *pywl_idle_inhibitor_from_link(struct wl_list *l) {
+    struct wlr_idle_inhibitor_v1 *inhibitor;
+    return wl_container_of(l, inhibitor, link);
 }
 """
 

@@ -220,6 +220,8 @@ class Server:  # pylint: disable=too-many-instance-attributes
     output_mgr: object
     output_power_mgr: object
     session_lock_mgr: object
+    idle_notifier: object
+    idle_inhibit_mgr: object
     seat: object
     cursor: object
     xcursor_mgr: object
@@ -398,6 +400,9 @@ def _default_config() -> SimpleNamespace:
         repeat_rate=25,
         repeat_delay=600,
         sloppy_focus=False,
+        # If True, idle inhibitors keep idle disabled regardless of whether
+        # their surface is on-screen.
+        idle_inhibit_ignore_visibility=False,
         root_color=(0x22 / 255, 0x22 / 255, 0x22 / 255, 1.0),
         locked_color=(0x1a / 255, 0x1a / 255, 0x1a / 255, 1.0),
         fullscreen_color=(0.0, 0.0, 0.0, 1.0),
@@ -517,6 +522,10 @@ def setup() -> Server:  # pylint: disable=too-many-locals,too-many-statements
         scene, lib.wlr_gamma_control_manager_v1_create(display))
     # Screen-locker protocol (swaylock, waylock).
     session_lock_mgr = lib.wlr_session_lock_manager_v1_create(display)
+    # ext-idle-notify-v1: swayidle subscribes here. We toggle its inhibited
+    # flag whenever a visible idle-inhibit client comes or goes.
+    idle_notifier = lib.wlr_idle_notifier_v1_create(display)
+    idle_inhibit_mgr = lib.wlr_idle_inhibit_v1_create(display)
 
     xdg_shell = lib.wlr_xdg_shell_create(display, 6)
     _trace(f"setup: xdg_shell={xdg_shell}")
@@ -549,7 +558,9 @@ def setup() -> Server:  # pylint: disable=too-many-locals,too-many-statements
         layers=layers, root_bg=root_bg, locked_bg=locked_bg,
         drag_icon=drag_icon, xdg_shell=xdg_shell, output_mgr=output_mgr,
         output_power_mgr=output_power_mgr,
-        session_lock_mgr=session_lock_mgr, seat=seat,
+        session_lock_mgr=session_lock_mgr,
+        idle_notifier=idle_notifier, idle_inhibit_mgr=idle_inhibit_mgr,
+        seat=seat,
         cursor=cursor, xcursor_mgr=xcursor_mgr, keyboard_group=ffi.NULL,
     )
     server.keyboard_group = create_keyboard_group(server)
@@ -577,6 +588,8 @@ def setup() -> Server:  # pylint: disable=too-many-locals,too-many-statements
                lambda d: on_output_power_set_mode(server, d)),
         listen(lib.pywl_session_lock_mgr_new_lock(session_lock_mgr),
                lambda d: on_new_session_lock(server, d)),
+        listen(lib.pywl_idle_inhibit_new_inhibitor(idle_inhibit_mgr),
+               lambda d: on_new_idle_inhibitor(server, d)),
         listen(lib.pywl_xdg_shell_new_toplevel(xdg_shell),
                lambda d: on_new_xdg_toplevel(server, d)),
         listen(lib.pywl_xdg_shell_new_popup(xdg_shell),
@@ -615,10 +628,10 @@ def cleanup(server: Server) -> None:
     """Shut everything down in the reverse of the order we built it.
     Event handlers have to be removed before the things they listen to
     are freed, otherwise an event could fire on already-freed memory."""
-    lib.wl_display_destroy_clients(server.display)
     for handle in server.listeners:
         handle.remove()
     server.listeners.clear()
+    lib.wl_display_destroy_clients(server.display)
     if server.keyboard_group != ffi.NULL:
         lib.wlr_keyboard_group_destroy(server.keyboard_group)
     lib.wlr_xcursor_manager_destroy(server.xcursor_mgr)
@@ -1023,6 +1036,8 @@ def arrange(server: Server, monitor: Monitor | None) -> None:
                 ffi.addressof(client.scene_tree.node),
                 _visible(client, monitor))
 
+    check_idle_inhibitor(server, None)
+
 
 def _visible(client: Client, monitor: Monitor) -> bool:
     """True if this window belongs to this screen and any of its workspace
@@ -1261,19 +1276,19 @@ def on_xdg_toplevel_unmap(server: Server, client: Client, _data) -> None:
     if not client.mapped:
         return
     client.mapped = False
-    monitor = client.monitor
     if client in server.clients:
         server.clients.remove(client)
     if client in server.fstack:
         server.fstack.remove(client)
     if server.grab is not None and server.grab.client is client:
         end_grab(server)
+    if client.monitor is not None:
+        arrange(server, client.monitor)
+    client.surface.data = ffi.NULL
     lib.wlr_scene_node_destroy(ffi.addressof(client.scene_tree.node))
     client.scene_tree = None
     client.scene_surface = None
     client.border_rects = []
-    if monitor is not None:
-        arrange(server, monitor)
     focus_client(server, top_client(server, server.selected_monitor), lift=True)
     print_status(server)
 
@@ -1724,6 +1739,65 @@ def destroy_lock(
     lib.wlr_scene_node_destroy(ffi.addressof(lock.scene_tree.node))
     if server.current_lock is lock:
         server.current_lock = None
+
+
+# --- Idle: inhibit + notify -------------------------------------------------
+
+def on_new_idle_inhibitor(server: Server, data) -> None:
+    """A client (e.g. a video player) asked us not to dim/lock while its
+    surface is visible. We track it until destroyed and reevaluate the
+    idle-inhibited state."""
+    inhibitor = ffi.cast("struct wlr_idle_inhibitor_v1 *", data)
+
+    def on_destroy(destroy_data):
+        # `data` here is the inhibitor's surface; exclude its root from
+        # the visibility check since the inhibitor is still linked.
+        root = lib.wlr_surface_get_root_surface(
+            ffi.cast("struct wlr_surface *", destroy_data))
+        check_idle_inhibitor(server, root)
+        handle.remove()
+
+    handle = listen(lib.pywl_idle_inhibitor_destroy(inhibitor), on_destroy)
+    check_idle_inhibitor(server, None)
+
+
+def check_idle_inhibitor(server: Server, exclude) -> None:
+    """Set `idle_notifier`'s inhibited flag based on whether any active
+    idle inhibitor's surface is currently on-screen (or unconditionally,
+    if `idle_inhibit_ignore_visibility` is set). `exclude` skips the surface
+    of an inhibitor that's about to be destroyed."""
+    inhibited = any(
+        _inhibitor_active(inhibitor, exclude)
+        for inhibitor in _iter_idle_inhibitors(server.idle_inhibit_mgr))
+    lib.wlr_idle_notifier_v1_set_inhibited(server.idle_notifier, inhibited)
+
+
+def _iter_idle_inhibitors(mgr):
+    """Walk the manager's inhibitor list."""
+    sentinel = ffi.addressof(mgr.inhibitors)
+    link = mgr.inhibitors.next
+    while link != sentinel:
+        yield lib.pywl_idle_inhibitor_from_link(link)
+        link = link.next
+
+
+def _inhibitor_active(inhibitor, exclude) -> bool:
+    """True if `inhibitor` should inhibit idle right now: its surface
+    isn't the one being excluded, and it's either visible on the scene
+    graph or we've been told to ignore visibility."""
+    root = lib.wlr_surface_get_root_surface(inhibitor.surface)
+    if root == exclude:
+        return False
+    if config.idle_inhibit_ignore_visibility:
+        return True
+    tree = ffi.cast("struct wlr_scene_tree *", root.data)
+    if tree == ffi.NULL:
+        # No scene tree attached yet: assume the surface is live.
+        return True
+    lx = ffi.new("int *")
+    ly = ffi.new("int *")
+    return bool(lib.wlr_scene_node_coords(
+        ffi.addressof(tree.node), lx, ly))
 
 
 def _notify_keyboard_enter(server: Server, surface) -> None:
@@ -2197,6 +2271,7 @@ def on_keyboard_key(server: Server, data) -> None:
     first; if none match, forward the key to the focused window."""
     ev = ffi.cast("struct wlr_keyboard_key_event *", data)
     kb = lib.pywl_keyboard_group_keyboard(server.keyboard_group)
+    lib.wlr_idle_notifier_v1_notify_activity(server.idle_notifier, server.seat)
     handled = False
     if ev.state == lib.WL_KEYBOARD_KEY_STATE_PRESSED and not server.locked:
         sym = lib.pywl_keyboard_keysym(kb, ev.keycode)
@@ -2255,6 +2330,9 @@ def process_cursor_motion(server: Server, time_msec: int) -> None:
     """After any kind of cursor movement: update which screen is selected,
     feed an in-progress move/resize, or tell the window under the cursor
     that the pointer is over it."""
+    if time_msec:
+        lib.wlr_idle_notifier_v1_notify_activity(
+            server.idle_notifier, server.seat)
     cursor_x = server.cursor.x
     cursor_y = server.cursor.y
 
@@ -2284,6 +2362,7 @@ def on_cursor_button(server: Server, data) -> None:
     bindings, then click-to-focus; otherwise forward the event to the
     window under the cursor. A release ends any in-progress drag."""
     ev = ffi.cast("struct wlr_pointer_button_event *", data)
+    lib.wlr_idle_notifier_v1_notify_activity(server.idle_notifier, server.seat)
     pressed = ev.state == lib.WL_POINTER_BUTTON_STATE_PRESSED
 
     if not pressed and server.grab is not None:
@@ -2316,6 +2395,7 @@ def on_cursor_button(server: Server, data) -> None:
 def on_cursor_axis(server: Server, data) -> None:
     """Scroll wheel event: forward to the focused window."""
     ev = ffi.cast("struct wlr_pointer_axis_event *", data)
+    lib.wlr_idle_notifier_v1_notify_activity(server.idle_notifier, server.seat)
     lib.wlr_seat_pointer_notify_axis(
         server.seat, ev.time_msec, ev.orientation, ev.delta,
         ev.delta_discrete, ev.source, ev.relative_direction)

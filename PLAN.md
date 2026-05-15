@@ -128,7 +128,7 @@ Without these you can't have a bar, wallpaper, lockscreen, or proper clipboard.
 34. **`wlr_primary_selection_v1` manager** — middle-click paste. The seat listener was already wired in Tier 0 #7; this item just adds the protocol global.
 35. [DONE] **`wlr_data_control_v1`** + **`wlr_ext_data_control_v1`** — `wl-clipboard`, `cliphist`.
 36. [DONE] **`wlr_session_lock_v1`** — lock surfaces on `Layer.Block`, enables the `locked_bg` rect created in Tier 0 #4. `swaylock`, `waylock`.
-37. **`wlr_idle_notifier_v1`** + **`wlr_idle_inhibit_v1`** — `swayidle`, "inhibit while playing video". Honors `bypass_surface_visibility` from `config.py`.
+37. [DONE] **`wlr_idle_notifier_v1`** + **`wlr_idle_inhibit_v1`** — `swayidle`, "inhibit while playing video". Honors `idle_inhibit_ignore_visibility` from `config.py`.
 
 ## Tier 3 — input quality
 

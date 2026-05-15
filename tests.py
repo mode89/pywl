@@ -49,6 +49,7 @@ _fake_config = SN(
         SN(name="monocle", symbol="[M]"),
     ],
     rules=[],
+    idle_inhibit_ignore_visibility=False,
 )
 
 
@@ -106,6 +107,7 @@ def make_server(monitor: wl.Monitor) -> wl.Server:
         xdg_shell=MagicMock(), output_mgr=MagicMock(),
         output_power_mgr=MagicMock(),
         session_lock_mgr=MagicMock(),
+        idle_notifier=MagicMock(), idle_inhibit_mgr=MagicMock(),
         seat=MagicMock(), cursor=MagicMock(),
         xcursor_mgr=MagicMock(), keyboard_group=MagicMock(),
     )
@@ -1185,3 +1187,123 @@ def test_cleanup_removes_global_listeners_before_destroying_clients():
     wl.cleanup(s)
 
     assert order[:2] == ["remove", "destroy_clients"]
+
+
+def test_unmap_arranges_before_scene_destroy_and_clears_surface_data(
+    monkeypatch,
+):
+    """Idle-inhibit visibility is checked while the scene node is still
+    valid; after that the surface must not keep a stale scene pointer."""
+    m = make_monitor()
+    s = make_server(m)
+    c = make_client(m)
+    c.surface = SN(data=object())
+    c.scene_tree = SN(node=SN())
+    s.clients.append(c)
+    order = []
+
+    def arrange(_server, _monitor):
+        order.append("arrange")
+        assert c.surface.data is not wl.ffi.NULL
+
+    def destroy(_node):
+        order.append("destroy")
+        assert c.surface.data is wl.ffi.NULL
+
+    monkeypatch.setattr(wl, "arrange", arrange)
+    monkeypatch.setattr(wl, "focus_client", lambda *_a, **_k: None)
+    monkeypatch.setattr(wl, "top_client", lambda *_a, **_k: None)
+    monkeypatch.setattr(wl, "print_status", lambda *_a, **_k: None)
+    wl.lib.wlr_scene_node_destroy.side_effect = destroy
+
+    wl.on_xdg_toplevel_unmap(s, c, None)
+
+    assert order == ["arrange", "destroy"]
+
+
+def test_cursor_motion_zero_time_does_not_notify_idle_activity(monkeypatch):
+    """Internal pointer refreshes use time 0 and should not reset idle."""
+    m = make_monitor()
+    s = make_server(m)
+    s.cursor.x = 10
+    s.cursor.y = 20
+    monkeypatch.setattr(wl, "surface_at", lambda *_a: None)
+
+    wl.process_cursor_motion(s, 0)
+
+    wl.lib.wlr_idle_notifier_v1_notify_activity.assert_not_called()
+
+
+def test_cursor_motion_event_notifies_idle_activity(monkeypatch):
+    """Real pointer motion should reset idle."""
+    m = make_monitor()
+    s = make_server(m)
+    s.cursor.x = 10
+    s.cursor.y = 20
+    monkeypatch.setattr(wl, "surface_at", lambda *_a: None)
+
+    wl.process_cursor_motion(s, 123)
+
+    wl.lib.wlr_idle_notifier_v1_notify_activity.assert_called_once_with(
+        s.idle_notifier, s.seat)
+
+
+def test_idle_inhibit_no_inhibitors_clears_inhibited(monkeypatch):
+    """Nothing inhibiting: notifier's inhibited flag is False."""
+    monkeypatch.setattr(wl, "_iter_idle_inhibitors", lambda _m: iter(()))
+    monkeypatch.setattr(wl, "config", SN(idle_inhibit_ignore_visibility=False))
+    s = make_server(make_monitor())
+
+    wl.check_idle_inhibitor(s, None)
+
+    wl.lib.wlr_idle_notifier_v1_set_inhibited.assert_called_once_with(
+        s.idle_notifier, False)
+
+
+def test_idle_inhibit_visible_inhibitor_sets_inhibited(monkeypatch):
+    """A visible inhibitor (scene node reachable) inhibits idle."""
+    monkeypatch.setattr(wl, "config", SN(idle_inhibit_ignore_visibility=False))
+    surface = SN(data=SN(node=object()))
+    inhibitor = SN(surface=surface)
+    monkeypatch.setattr(
+        wl, "_iter_idle_inhibitors", lambda _m: iter([inhibitor]))
+    wl.lib.wlr_surface_get_root_surface.side_effect = lambda s: s
+    wl.lib.wlr_scene_node_coords.return_value = True
+    s = make_server(make_monitor())
+
+    wl.check_idle_inhibitor(s, None)
+
+    wl.lib.wlr_idle_notifier_v1_set_inhibited.assert_called_once_with(
+        s.idle_notifier, True)
+
+
+def test_idle_inhibit_excluded_surface_ignored(monkeypatch):
+    """An inhibitor whose root surface is `exclude` doesn't count."""
+    monkeypatch.setattr(wl, "config", SN(idle_inhibit_ignore_visibility=False))
+    surface = SN(data=SN(node=object()))
+    inhibitor = SN(surface=surface)
+    monkeypatch.setattr(
+        wl, "_iter_idle_inhibitors", lambda _m: iter([inhibitor]))
+    wl.lib.wlr_surface_get_root_surface.side_effect = lambda s: s
+    s = make_server(make_monitor())
+
+    wl.check_idle_inhibitor(s, surface)
+
+    wl.lib.wlr_idle_notifier_v1_set_inhibited.assert_called_once_with(
+        s.idle_notifier, False)
+
+
+def test_idle_inhibit_bypass_visibility_skips_scene_check(monkeypatch):
+    """Ignore-visibility mode inhibits without checking the scene."""
+    monkeypatch.setattr(wl, "config", SN(idle_inhibit_ignore_visibility=True))
+    inhibitor = SN(surface=SN(data=None))
+    monkeypatch.setattr(
+        wl, "_iter_idle_inhibitors", lambda _m: iter([inhibitor]))
+    wl.lib.wlr_surface_get_root_surface.side_effect = lambda s: s
+    s = make_server(make_monitor())
+
+    wl.check_idle_inhibitor(s, None)
+
+    wl.lib.wlr_scene_node_coords.assert_not_called()
+    wl.lib.wlr_idle_notifier_v1_set_inhibited.assert_called_once_with(
+        s.idle_notifier, True)
