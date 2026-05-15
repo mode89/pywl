@@ -537,6 +537,30 @@ struct wlr_output_power_manager_v1 *wlr_output_power_manager_v1_create(
         struct wl_display *);
 struct wl_signal *pywl_output_power_mgr_set_mode(
         struct wlr_output_power_manager_v1 *);
+
+// session-lock: swaylock-style screen lockers.
+struct wlr_session_lock_manager_v1;
+struct wlr_session_lock_v1;
+struct wlr_session_lock_surface_v1 {
+    struct wlr_output *output;
+    struct wlr_surface *surface;
+    ...;
+};
+struct wlr_session_lock_manager_v1 *wlr_session_lock_manager_v1_create(
+        struct wl_display *);
+void wlr_session_lock_v1_send_locked(struct wlr_session_lock_v1 *);
+void wlr_session_lock_v1_destroy(struct wlr_session_lock_v1 *);
+uint32_t wlr_session_lock_surface_v1_configure(
+        struct wlr_session_lock_surface_v1 *, uint32_t w, uint32_t h);
+struct wlr_scene_tree *wlr_scene_subsurface_tree_create(
+        struct wlr_scene_tree *parent, struct wlr_surface *);
+struct wl_signal *pywl_session_lock_mgr_new_lock(
+        struct wlr_session_lock_manager_v1 *);
+struct wl_signal *pywl_session_lock_new_surface(struct wlr_session_lock_v1 *);
+struct wl_signal *pywl_session_lock_unlock(struct wlr_session_lock_v1 *);
+struct wl_signal *pywl_session_lock_destroy(struct wlr_session_lock_v1 *);
+struct wl_signal *pywl_session_lock_surface_destroy(
+        struct wlr_session_lock_surface_v1 *);
 // wl_container_of for the head list: recovers the head from its link node.
 struct wlr_output_configuration_head_v1 *pywl_config_head_from_link(
         struct wl_list *link);
@@ -666,6 +690,7 @@ SOURCE = r"""
 #include <wlr/types/wlr_output_management_v1.h>
 #include <wlr/types/wlr_output_power_management_v1.h>
 #include <wlr/types/wlr_gamma_control_v1.h>
+#include <wlr/types/wlr_session_lock_v1.h>
 #include <wlr/types/wlr_server_decoration.h>
 #include <wlr/types/wlr_xdg_shell.h>
 #include <wlr/util/box.h>
@@ -836,6 +861,24 @@ struct wlr_output_configuration_head_v1 *pywl_config_head_from_link(
 struct wl_signal *pywl_output_power_mgr_set_mode(
         struct wlr_output_power_manager_v1 *m) {
     return &m->events.set_mode;
+}
+struct wl_signal *pywl_session_lock_mgr_new_lock(
+        struct wlr_session_lock_manager_v1 *m) {
+    return &m->events.new_lock;
+}
+struct wl_signal *pywl_session_lock_new_surface(
+        struct wlr_session_lock_v1 *l) {
+    return &l->events.new_surface;
+}
+struct wl_signal *pywl_session_lock_unlock(struct wlr_session_lock_v1 *l) {
+    return &l->events.unlock;
+}
+struct wl_signal *pywl_session_lock_destroy(struct wlr_session_lock_v1 *l) {
+    return &l->events.destroy;
+}
+struct wl_signal *pywl_session_lock_surface_destroy(
+        struct wlr_session_lock_surface_v1 *s) {
+    return &s->events.destroy;
 }
 """
 

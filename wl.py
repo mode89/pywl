@@ -91,6 +91,8 @@ class Monitor:  # pylint: disable=too-many-instance-attributes
     # (background / bottom / top / overlay).
     layer_surfaces: list[list] = field(
         default_factory=lambda: [[], [], [], []])
+    # wlr_session_lock_surface_v1 * while a locker is active.
+    lock_surface: object = None
     listeners: list = field(default_factory=list)
 
     @property
@@ -177,6 +179,14 @@ class LayerSurface:  # pylint: disable=too-many-instance-attributes
 
 
 @dataclass
+class SessionLock:
+    """The active screen-locker client (e.g. swaylock). At most one."""
+    wlr: object               # wlr_session_lock_v1 *
+    scene_tree: object        # wlr_scene_tree * under Layer.BLOCK
+    listeners: list = field(default_factory=list)
+
+
+@dataclass
 class Grab:
     """Where the mouse and the window were when the user started dragging.
     We need this so we can move/resize relative to the start, not the
@@ -209,6 +219,7 @@ class Server:  # pylint: disable=too-many-instance-attributes
     xdg_shell: object
     output_mgr: object
     output_power_mgr: object
+    session_lock_mgr: object
     seat: object
     cursor: object
     xcursor_mgr: object
@@ -226,6 +237,9 @@ class Server:  # pylint: disable=too-many-instance-attributes
     exclusive_focus: object = None
     # While locked, only the lock surface may hold keyboard focus.
     locked: bool = False
+    # Distinct from `locked`: a locker may crash, leaving us locked
+    # with no client (screen stays black until login from a TTY).
+    current_lock: SessionLock | None = None
 
 
 @dataclass(frozen=True)
@@ -501,6 +515,8 @@ def setup() -> Server:  # pylint: disable=too-many-locals,too-many-statements
     # Per-screen gamma LUT for wlsunset / gammastep; scene applies it.
     lib.wlr_scene_set_gamma_control_manager_v1(
         scene, lib.wlr_gamma_control_manager_v1_create(display))
+    # Screen-locker protocol (swaylock, waylock).
+    session_lock_mgr = lib.wlr_session_lock_manager_v1_create(display)
 
     xdg_shell = lib.wlr_xdg_shell_create(display, 6)
     _trace(f"setup: xdg_shell={xdg_shell}")
@@ -532,7 +548,8 @@ def setup() -> Server:  # pylint: disable=too-many-locals,too-many-statements
         output_layout=output_layout, scene=scene, scene_layout=scene_layout,
         layers=layers, root_bg=root_bg, locked_bg=locked_bg,
         drag_icon=drag_icon, xdg_shell=xdg_shell, output_mgr=output_mgr,
-        output_power_mgr=output_power_mgr, seat=seat,
+        output_power_mgr=output_power_mgr,
+        session_lock_mgr=session_lock_mgr, seat=seat,
         cursor=cursor, xcursor_mgr=xcursor_mgr, keyboard_group=ffi.NULL,
     )
     server.keyboard_group = create_keyboard_group(server)
@@ -558,6 +575,8 @@ def setup() -> Server:  # pylint: disable=too-many-locals,too-many-statements
                lambda d: on_output_mgr_apply_or_test(server, d, test=True)),
         listen(lib.pywl_output_power_mgr_set_mode(output_power_mgr),
                lambda d: on_output_power_set_mode(server, d)),
+        listen(lib.pywl_session_lock_mgr_new_lock(session_lock_mgr),
+               lambda d: on_new_session_lock(server, d)),
         listen(lib.pywl_xdg_shell_new_toplevel(xdg_shell),
                lambda d: on_new_xdg_toplevel(server, d)),
         listen(lib.pywl_xdg_shell_new_popup(xdg_shell),
@@ -767,6 +786,8 @@ def cleanup_monitor(server: Server, monitor: Monitor) -> None:
     for handle in monitor.listeners:
         handle.remove()
     monitor.listeners.clear()
+    if monitor.lock_surface is not None:
+        on_lock_surface_destroy(server, monitor, monitor.lock_surface)
     if monitor in server.monitors:
         server.monitors.remove(monitor)
 
@@ -790,15 +811,37 @@ def cleanup_monitor(server: Server, monitor: Monitor) -> None:
 def update_monitors(server: Server) -> None:
     """Layout-change hook: refresh every monitor's box, arrange, and
     advertise the new configuration to output-management clients."""
+    # Hide app content during a lock by sizing the black rect over the
+    # full layout (otherwise it stays 0x0).
+    layout_box = ffi.new("struct wlr_box *")
+    lib.wlr_output_layout_get_box(
+        server.output_layout, ffi.NULL, layout_box)
+    lib.wlr_scene_node_set_position(
+        lib.pywl_scene_rect_node(server.locked_bg),
+        layout_box.x, layout_box.y)
+    lib.wlr_scene_rect_set_size(
+        server.locked_bg, layout_box.width, layout_box.height)
+
     output_config = lib.wlr_output_configuration_v1_create()
     for monitor in server.monitors:
         _refresh_monitor_box(server, monitor)
         arrange_layers(server, monitor)
         arrange(server, monitor)
+        if monitor.lock_surface is not None:
+            mx, my, mw, mh = monitor.m
+            scene_tree = ffi.cast(
+                "struct wlr_scene_tree *",
+                monitor.lock_surface.surface.data)
+            lib.wlr_scene_node_set_position(
+                ffi.addressof(scene_tree.node), mx, my)
+            lib.wlr_session_lock_surface_v1_configure(
+                monitor.lock_surface, mw, mh)
         if monitor.wlr_output.enabled:
             head = lib.wlr_output_configuration_head_v1_create(
                 output_config, monitor.wlr_output)
             head.state.x, head.state.y = monitor.m[0], monitor.m[1]
+    if server.locked:
+        _focus_selected_lock_surface(server)
     # set_configuration takes ownership of `output_config`.
     lib.wlr_output_manager_v1_set_configuration(
         server.output_mgr, output_config)
@@ -1566,6 +1609,136 @@ def on_layer_destroy(server: Server, layer: LayerSurface, _data) -> None:
         arrange_layers(server, monitor)
 
 
+# --- Session lock ----------------------------------------------------------
+
+def on_new_session_lock(server: Server, data) -> None:
+    """A screen-locker (swaylock, waylock) asked to take over the screen.
+    Reject if one is already active; otherwise enable the black
+    backdrop, blank focus, and await per-output lock surfaces."""
+    wlr_lock = ffi.cast("struct wlr_session_lock_v1 *", data)
+    if server.current_lock is not None:
+        lib.wlr_session_lock_v1_destroy(wlr_lock)
+        return
+    lib.wlr_scene_node_set_enabled(
+        lib.pywl_scene_rect_node(server.locked_bg), True)
+    focus_client(server, None, lift=False)
+    lib.wlr_seat_pointer_clear_focus(server.seat)
+    if server.grab is not None:
+        server.grab = None
+        server.cursor_mode = CursorMode.NORMAL
+    scene_tree = lib.wlr_scene_tree_create(server.layers[Layer.BLOCK])
+    lock = SessionLock(wlr=wlr_lock, scene_tree=scene_tree)
+    server.current_lock = lock
+    server.locked = True
+    lock.listeners = [
+        listen(lib.pywl_session_lock_new_surface(wlr_lock),
+               lambda d: on_new_lock_surface(server, lock, d)),
+        listen(lib.pywl_session_lock_unlock(wlr_lock),
+               lambda _d: destroy_lock(server, lock, unlocked=True)),
+        listen(lib.pywl_session_lock_destroy(wlr_lock),
+               lambda _d: destroy_lock(server, lock, unlocked=False)),
+    ]
+    lib.wlr_session_lock_v1_send_locked(wlr_lock)
+
+
+def on_new_lock_surface(
+    server: Server, lock: SessionLock, data
+) -> None:
+    """The locker created its surface for one screen. Place it over that
+    screen and give it keyboard focus if it's the selected one."""
+    surface = ffi.cast("struct wlr_session_lock_surface_v1 *", data)
+    monitor = next(
+        (m for m in server.monitors if m.wlr_output == surface.output), None)
+    if monitor is None:
+        return
+    scene_tree = lib.wlr_scene_subsurface_tree_create(
+        lock.scene_tree, surface.surface)
+    # Stash for update_monitors so it can reposition on layout change.
+    surface.surface.data = ffi.cast("void *", scene_tree)
+    monitor.lock_surface = surface
+    mx, my, mw, mh = monitor.m
+    lib.wlr_scene_node_set_position(
+        ffi.addressof(scene_tree.node), mx, my)
+    lib.wlr_session_lock_surface_v1_configure(surface, mw, mh)
+    # Self-remove on fire; wlroots asserts an empty listener_list when
+    # destroying the lock surface.
+    def _on_destroy(_data):
+        destroy_handle.remove()
+        on_lock_surface_destroy(server, monitor, surface)
+    destroy_handle = listen(
+        lib.pywl_session_lock_surface_destroy(surface), _on_destroy)
+    if monitor is server.selected_monitor:
+        _notify_keyboard_enter(server, surface.surface)
+
+
+def on_lock_surface_destroy(
+    server: Server, monitor: Monitor, surface
+) -> None:
+    """One screen's lock surface went away. If the locker is still alive,
+    hand focus to another of its surfaces; otherwise clear focus."""
+    if monitor.lock_surface is not surface:
+        return
+    monitor.lock_surface = None
+    seat = server.seat
+    if surface.surface != lib.pywl_seat_keyboard_focused_surface(seat):
+        return
+    if not server.locked:
+        focus_client(
+            server, top_client(server, server.selected_monitor), lift=True)
+        return
+    other = next(
+        (m.lock_surface for m in server.monitors
+         if m.lock_surface is not None), None)
+    if other is not None:
+        _notify_keyboard_enter(server, other.surface)
+    else:
+        lib.wlr_seat_keyboard_clear_focus(seat)
+
+
+def _focus_selected_lock_surface(server: Server) -> None:
+    """Keep keyboard input on the lock surface for the selected screen."""
+    monitor = server.selected_monitor
+    if monitor is not None and monitor.lock_surface is not None:
+        _notify_keyboard_enter(server, monitor.lock_surface.surface)
+
+
+def destroy_lock(
+    server: Server, lock: SessionLock, *, unlocked: bool
+) -> None:
+    """Tear down `lock`. `unlocked=True` means the user authenticated and
+    we can show the desktop again; `unlocked=False` means the locker
+    died unexpectedly and the screen stays black."""
+    lib.wlr_seat_keyboard_clear_focus(server.seat)
+    server.locked = not unlocked
+    if unlocked:
+        lib.wlr_scene_node_set_enabled(
+            lib.pywl_scene_rect_node(server.locked_bg), False)
+        focus_client(server, top_client(server, server.selected_monitor),
+                     lift=False)
+        # Re-pick under the cursor: refresh icon and pointer-enter
+        # without waiting for the next motion event.
+        process_cursor_motion(server, 0)
+    for handle in lock.listeners:
+        handle.remove()
+    lock.listeners.clear()
+    lib.wlr_scene_node_destroy(ffi.addressof(lock.scene_tree.node))
+    if server.current_lock is lock:
+        server.current_lock = None
+
+
+def _notify_keyboard_enter(server: Server, surface) -> None:
+    """Send keyboard-enter to `surface` with the keys currently held."""
+    kb = lib.wlr_seat_get_keyboard(server.seat)
+    if kb != ffi.NULL:
+        lib.wlr_seat_keyboard_notify_enter(
+            server.seat, surface,
+            kb.keycodes, kb.num_keycodes,
+            ffi.addressof(kb.modifiers))
+    else:
+        lib.wlr_seat_keyboard_notify_enter(
+            server.seat, surface, ffi.NULL, 0, ffi.NULL)
+
+
 def arrange_layer(
     monitor: Monitor,
     layer_list: list,
@@ -1644,6 +1817,10 @@ def focus_client(
     """Make `client` the focused window: keyboard input goes to it, its
     border switches to the focus colour, and (if `lift`) it's raised to
     the top of its layer. Pass `None` to clear focus entirely."""
+    # While locked, only the lock surface may hold focus; ignore both
+    # cursor/keyboard refocus and bookkeeping triggered by other paths.
+    if server.locked:
+        return
     old_surface = lib.pywl_seat_keyboard_focused_surface(server.seat)
     if client is not None and lift:
         lib.wlr_scene_node_raise_to_top(
@@ -2021,7 +2198,7 @@ def on_keyboard_key(server: Server, data) -> None:
     ev = ffi.cast("struct wlr_keyboard_key_event *", data)
     kb = lib.pywl_keyboard_group_keyboard(server.keyboard_group)
     handled = False
-    if ev.state == lib.WL_KEYBOARD_KEY_STATE_PRESSED:
+    if ev.state == lib.WL_KEYBOARD_KEY_STATE_PRESSED and not server.locked:
         sym = lib.pywl_keyboard_keysym(kb, ev.keycode)
         mods = lib.wlr_keyboard_get_modifiers(kb) & ~_IGNORE_MODS
         handled = dispatch_key(server, mods, sym)
@@ -2114,7 +2291,7 @@ def on_cursor_button(server: Server, data) -> None:
         # Don't forward the button release that ended a drag.
         return
 
-    if pressed:
+    if pressed and not server.locked:
         kb = lib.pywl_keyboard_group_keyboard(server.keyboard_group)
         mods = lib.wlr_keyboard_get_modifiers(kb) & ~_IGNORE_MODS
         for binding in config.buttons:

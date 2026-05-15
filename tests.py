@@ -1,3 +1,4 @@
+# pylint: disable=too-many-lines
 """
 Tests for pywl.
 
@@ -104,6 +105,7 @@ def make_server(monitor: wl.Monitor) -> wl.Server:
         root_bg=MagicMock(), locked_bg=MagicMock(), drag_icon=MagicMock(),
         xdg_shell=MagicMock(), output_mgr=MagicMock(),
         output_power_mgr=MagicMock(),
+        session_lock_mgr=MagicMock(),
         seat=MagicMock(), cursor=MagicMock(),
         xcursor_mgr=MagicMock(), keyboard_group=MagicMock(),
     )
@@ -875,3 +877,311 @@ def test_output_power_set_mode_unknown_output_noop(monkeypatch):
     wl.on_output_power_set_mode(s, event)
 
     wl.lib.wlr_output_commit_state.assert_not_called()
+
+
+def test_session_lock_locks_and_focuses_surface(monkeypatch):
+    """new_lock enables the backdrop, blanks focus, and accepts the lock;
+    a per-output surface then takes keyboard focus on the selected monitor."""
+    _quiet_arrange(monkeypatch)
+    m = make_monitor()
+    s = make_server(m)
+    wlr_lock = SN()
+
+    wl.on_new_session_lock(s, wlr_lock)
+
+    assert s.locked is True
+    assert s.current_lock is not None
+    wl.lib.wlr_session_lock_v1_send_locked.assert_called_once_with(wlr_lock)
+    wl.lib.wlr_scene_node_set_enabled.assert_any_call(
+        wl.lib.pywl_scene_rect_node.return_value, True)
+
+    lock_surface = SN(output=m.wlr_output, surface=SN(data=None))
+    wl.on_new_lock_surface(s, s.current_lock, lock_surface)
+
+    assert m.lock_surface is lock_surface
+    wl.lib.wlr_session_lock_surface_v1_configure.assert_called_once()
+    wl.lib.wlr_seat_keyboard_notify_enter.assert_called()
+
+
+def test_session_lock_start_clears_pointer_and_grab():
+    """Lock start drops stale pointer focus and compositor drags."""
+    m = make_monitor()
+    s = make_server(m)
+    s.grab = object()
+    s.cursor_mode = wl.CursorMode.MOVE
+
+    wl.on_new_session_lock(s, SN())
+
+    wl.lib.wlr_seat_pointer_clear_focus.assert_called_once_with(s.seat)
+    assert s.grab is None
+    assert s.cursor_mode is wl.CursorMode.NORMAL
+
+
+def test_session_lock_rejects_second_locker():
+    """While a locker is active, a second new_lock is destroyed outright."""
+    m = make_monitor()
+    s = make_server(m)
+    s.locked = True
+    s.current_lock = wl.SessionLock(wlr=SN(), scene_tree=MagicMock())
+    intruder = SN()
+
+    wl.on_new_session_lock(s, intruder)
+
+    wl.lib.wlr_session_lock_v1_destroy.assert_called_once_with(intruder)
+    wl.lib.wlr_session_lock_v1_send_locked.assert_not_called()
+
+
+def test_session_lock_unlock_restores_focus(monkeypatch):
+    """unlock disables the backdrop, clears `locked`, and refocuses."""
+    _quiet_arrange(monkeypatch)
+    # process_cursor_motion would walk monitors with mocked cursor coords.
+    monkeypatch.setattr(wl, "process_cursor_motion", lambda *_a, **_k: None)
+    m = make_monitor()
+    s = make_server(m)
+    lock = wl.SessionLock(wlr=SN(), scene_tree=MagicMock())
+    s.current_lock = lock
+    s.locked = True
+
+    wl.destroy_lock(s, lock, unlocked=True)
+
+    assert s.locked is False
+    assert s.current_lock is None
+    wl.lib.wlr_scene_node_set_enabled.assert_any_call(
+        wl.lib.pywl_scene_rect_node.return_value, False)
+
+
+def test_focus_client_noop_while_locked():
+    """While locked, focus_client must not touch the seat."""
+    m = make_monitor()
+    s = make_server(m)
+    s.locked = True
+    c = make_client(m)
+
+    wl.focus_client(s, c, lift=True)
+
+    wl.lib.wlr_seat_keyboard_notify_enter.assert_not_called()
+    wl.lib.wlr_xdg_toplevel_set_activated.assert_not_called()
+
+
+def test_cursor_button_while_locked_does_not_bind_or_focus():
+    """Locked: skip mouse bindings + click-to-focus; still forward."""
+    m = make_monitor()
+    s = make_server(m)
+    s.locked = True
+    ev = SN(state=wl.lib.WL_POINTER_BUTTON_STATE_PRESSED, button=1,
+            time_msec=0)
+
+    wl.on_cursor_button(s, ev)
+
+    wl.lib.wlr_xdg_toplevel_set_activated.assert_not_called()
+    wl.lib.wlr_seat_pointer_notify_button.assert_called_once()
+
+
+def test_keyboard_key_while_locked_skips_bindings(monkeypatch):
+    """Locked: compositor keybindings are skipped; key still forwards."""
+    m = make_monitor()
+    s = make_server(m)
+    s.locked = True
+    dispatch = MagicMock(return_value=True)
+    monkeypatch.setattr(wl, "dispatch_key", dispatch)
+    ev = SN(state=wl.lib.WL_KEYBOARD_KEY_STATE_PRESSED, keycode=24,
+            time_msec=123)
+
+    wl.on_keyboard_key(s, ev)
+
+    dispatch.assert_not_called()
+    wl.lib.wlr_seat_keyboard_notify_key.assert_called_once_with(
+        s.seat, 123, 24, wl.lib.WL_KEYBOARD_KEY_STATE_PRESSED)
+
+
+def test_cursor_button_while_locked_skips_mouse_bindings(monkeypatch):
+    """Locked: mouse bindings are skipped even if the click matches."""
+    action = MagicMock()
+    monkeypatch.setitem(wl.ACTIONS, "move_resize", action)
+    monkeypatch.setattr(wl, "config", SN(
+        buttons=[SN(mod=0, button=1, action="move_resize", arg="move")],
+        keys=[], layouts=_fake_config.layouts,
+    ))
+    m = make_monitor()
+    s = make_server(m)
+    s.locked = True
+    ev = SN(state=wl.lib.WL_POINTER_BUTTON_STATE_PRESSED, button=1,
+            time_msec=0)
+
+    wl.on_cursor_button(s, ev)
+
+    action.assert_not_called()
+    wl.lib.wlr_seat_pointer_notify_button.assert_called_once()
+
+
+def test_session_lock_crash_keeps_screen_locked(monkeypatch):
+    """If the locker dies before unlock, keep the black screen enabled."""
+    refresh = MagicMock()
+    monkeypatch.setattr(wl, "process_cursor_motion", refresh)
+    m = make_monitor()
+    s = make_server(m)
+    lock = wl.SessionLock(wlr=SN(), scene_tree=MagicMock())
+    s.current_lock = lock
+    s.locked = True
+
+    wl.destroy_lock(s, lock, unlocked=False)
+
+    assert s.locked is True
+    assert s.current_lock is None
+    wl.lib.wlr_scene_node_set_enabled.assert_not_called()
+    refresh.assert_not_called()
+
+
+def test_session_lock_unlock_refreshes_pointer(monkeypatch):
+    """Unlock re-picks the pointer target without waiting for motion."""
+    refresh = MagicMock()
+    monkeypatch.setattr(wl, "process_cursor_motion", refresh)
+    m = make_monitor()
+    s = make_server(m)
+    lock = wl.SessionLock(wlr=SN(), scene_tree=MagicMock())
+    s.current_lock = lock
+    s.locked = True
+
+    wl.destroy_lock(s, lock, unlocked=True)
+
+    refresh.assert_called_once_with(s, 0)
+
+
+def test_lock_surface_destroy_self_removes_listener(monkeypatch):
+    """wlroots requires the destroy listener list empty by teardown."""
+    callbacks = []
+    handle = MagicMock()
+
+    def fake_listen(_signal, cb):
+        callbacks.append(cb)
+        return handle
+
+    monkeypatch.setattr(wl, "listen", fake_listen)
+    m = make_monitor()
+    s = make_server(m)
+    lock = wl.SessionLock(wlr=SN(), scene_tree=MagicMock())
+    surface = SN(output=m.wlr_output, surface=SN(data=None))
+
+    wl.on_new_lock_surface(s, lock, surface)
+    callbacks[0](None)
+
+    handle.remove.assert_called_once()
+    assert m.lock_surface is None
+
+
+def test_lock_surface_destroy_moves_focus_to_another_surface():
+    """If one lock surface dies, keyboard focus stays within the lock."""
+    m1 = make_monitor()
+    m2 = make_monitor()
+    s = make_server(m1)
+    s.monitors.append(m2)
+    s.locked = True
+    surface1 = SN(surface=object())
+    surface2 = SN(surface=object())
+    m1.lock_surface = surface1
+    m2.lock_surface = surface2
+    wl.lib.pywl_seat_keyboard_focused_surface.return_value = surface1.surface
+
+    wl.on_lock_surface_destroy(s, m1, surface1)
+
+    assert m1.lock_surface is None
+    wl.lib.wlr_seat_keyboard_clear_focus.assert_not_called()
+    wl.lib.wlr_seat_keyboard_notify_enter.assert_called_once()
+
+
+def test_lock_surface_destroy_clears_focus_if_last_surface():
+    """If no lock surface remains, keyboard focus must be empty."""
+    m = make_monitor()
+    s = make_server(m)
+    s.locked = True
+    surface = SN(surface=object())
+    m.lock_surface = surface
+    wl.lib.pywl_seat_keyboard_focused_surface.return_value = surface.surface
+
+    wl.on_lock_surface_destroy(s, m, surface)
+
+    assert m.lock_surface is None
+    wl.lib.wlr_seat_keyboard_clear_focus.assert_called_once_with(s.seat)
+
+
+def test_update_monitors_refocuses_selected_lock_surface(monkeypatch):
+    """After output changes, the selected screen's lock surface gets keys."""
+    _quiet_arrange(monkeypatch)
+    layout_box = SN(x=0, y=0, width=1000, height=800)
+    monkeypatch.setattr(wl, "ffi", SN(
+        NULL=None,
+        addressof=lambda *_a, **_k: None,
+        cast=lambda _t, x: x,
+        new=lambda *_a, **_k: layout_box,
+    ))
+    m = make_monitor()
+    lock_surface = SN(surface=SN(data=SN(node=MagicMock())))
+    m.lock_surface = lock_surface
+    s = make_server(m)
+    s.locked = True
+    wl.lib.wlr_seat_get_keyboard.return_value = wl.ffi.NULL
+
+    wl.update_monitors(s)
+
+    wl.lib.wlr_seat_keyboard_notify_enter.assert_called_with(
+        s.seat, lock_surface.surface, wl.ffi.NULL, 0, wl.ffi.NULL)
+
+
+def test_update_monitors_resizes_locked_bg_and_lock_surface(monkeypatch):
+    """Layout changes keep app content hidden and lock surfaces fitted."""
+    _quiet_arrange(monkeypatch)
+    layout_box = SN(x=-10, y=20, width=3000, height=900)
+    monkeypatch.setattr(wl, "ffi", SN(
+        NULL=None,
+        addressof=lambda *_a, **_k: None,
+        cast=lambda _t, x: x,
+        new=lambda *_a, **_k: layout_box,
+    ))
+    m = make_monitor(1000, 800)
+    m.lock_surface = SN(surface=SN(data=SN(node=MagicMock())))
+    s = make_server(m)
+
+    wl.update_monitors(s)
+
+    wl.lib.wlr_scene_rect_set_size.assert_called_with(
+        s.locked_bg, 3000, 900)
+    wl.lib.wlr_session_lock_surface_v1_configure.assert_called_with(
+        m.lock_surface, 1000, 800)
+
+
+def test_cleanup_monitor_destroys_lock_surface_before_removal(monkeypatch):
+    """Unplugging a screen while locked forgets its lock surface."""
+    monkeypatch.setattr(wl, "arrange", lambda *_a: None)
+    monkeypatch.setattr(wl, "print_status", lambda *_a: None)
+    m1 = make_monitor()
+    m2 = make_monitor()
+    surface1 = SN(surface=object())
+    surface2 = SN(surface=object())
+    m1.lock_surface = surface1
+    m2.lock_surface = surface2
+    s = make_server(m1)
+    s.monitors.append(m2)
+    s.locked = True
+    wl.lib.pywl_seat_keyboard_focused_surface.return_value = surface1.surface
+
+    wl.cleanup_monitor(s, m1)
+
+    assert m1.lock_surface is None
+    assert m1 not in s.monitors
+    assert s.selected_monitor is m2
+    wl.lib.wlr_seat_keyboard_notify_enter.assert_called_once()
+
+
+def test_cleanup_removes_global_listeners_before_destroying_clients():
+    """Shutdown should not let client teardown fire global listeners that
+    still point at compositor-owned objects."""
+    m = make_monitor()
+    s = make_server(m)
+    order = []
+    s.listeners = [MagicMock(remove=lambda: order.append("remove"))]
+    wl.lib.wl_display_destroy_clients.side_effect = lambda _d: order.append(
+        "destroy_clients")
+
+    wl.cleanup(s)
+
+    assert order[:2] == ["remove", "destroy_clients"]
