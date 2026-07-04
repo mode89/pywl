@@ -325,16 +325,28 @@ def test_setup_decoration_listener():
 
 
 def test_install_signals_signums():
-    """The compositor installs handlers for exactly SIGINT, SIGTERM,
-    SIGCHLD, and SIGPIPE -- the four signals it cares about."""
+    """The compositor installs handlers for exactly SIGHUP, SIGINT, SIGTERM,
+    SIGCHLD, and SIGPIPE -- the five signals it cares about."""
     server = make_server()
 
     app.install_signals(server)
 
     signums = {c.args[0] for c in server.add_signal.mock_calls}
     assert signums == {
-        signal.SIGINT, signal.SIGTERM, signal.SIGCHLD, signal.SIGPIPE,
+        signal.SIGHUP, signal.SIGINT, signal.SIGTERM, signal.SIGCHLD,
+        signal.SIGPIPE,
     }
+
+
+def test_install_signals_sighup():
+    """SIGHUP (terminal closure) cleanly stops the display loop."""
+    server = make_server()
+    app.install_signals(server)
+    by_signum = {c.args[0]: c.args[1] for c in server.add_signal.mock_calls}
+
+    by_signum[signal.SIGHUP](signal.SIGHUP)
+
+    server.lib.wl_display_terminate.assert_called_once_with("DISPLAY")
 
 
 def test_install_signals_sigterm():

@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$root"
+
+state_home="${XDG_STATE_HOME:-$HOME/.local/state}"
+log_dir="$state_home/welpy"
+log="$log_dir/profile-$(date '+%Y-%m-%d-%H-%M-%S').log"
+
+mkdir -p "$log_dir"
+echo "Writing profile to $log" >&2
+
+exec nix-shell --run "python -m cProfile -s cumulative -m welpy" > "$log"

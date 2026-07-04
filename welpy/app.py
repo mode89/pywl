@@ -271,8 +271,8 @@ def setup() -> Server: # pylint: disable=too-many-locals,too-many-statements
 
 
 def install_signals(server: Server) -> None:
-    """Make SIGINT/SIGTERM exit cleanly, reap zombie children on SIGCHLD, and
-    ignore SIGPIPE so a disconnecting app can't kill us mid-write."""
+    """Make SIGHUP/SIGINT/SIGTERM exit cleanly, reap zombie children on
+    SIGCHLD, and ignore SIGPIPE so a disconnect can't kill us mid-write."""
 
     def reap(_signum):
         try:
@@ -282,6 +282,7 @@ def install_signals(server: Server) -> None:
             pass
 
     server.listeners.extend([
+        server.add_signal(signal.SIGHUP, lambda _signum: terminate(server)),
         server.add_signal(signal.SIGINT, lambda _signum: terminate(server)),
         server.add_signal(signal.SIGTERM, lambda _signum: terminate(server)),
         server.add_signal(signal.SIGCHLD, reap),
@@ -300,8 +301,8 @@ def spawn(*argv: str) -> subprocess.Popen:
     return subprocess.Popen(
         argv, start_new_session=True,
         # Without this, children inherit our blocked signal mask (we use
-        # signalfd-based handlers, so SIGCHLD/SIGINT/SIGTERM/SIGPIPE are
-        # blocked) and our session/ctty. Alacritty's pty event loop livelocks
+        # signalfd-based handlers, so SIGHUP/SIGCHLD/SIGINT/SIGTERM/SIGPIPE
+        # are blocked) and our session/ctty. Alacritty's pty loop livelocks
         # on shutdown when SIGCHLD is blocked at start; mirror dwl's spawn() to
         # avoid the trap.
         # preexec_fn is documented as thread-unsafe; welpy is single-threaded.
